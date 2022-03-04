@@ -32,7 +32,6 @@ use super::{
     ColumnStatistics, DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream,
     SendableRecordBatchStream, Statistics,
 };
-use crate::execution::runtime_env::RuntimeEnv;
 use crate::{
     error::Result,
     physical_plan::{expressions, metrics::BaselineMetrics},
@@ -101,11 +100,7 @@ impl ExecutionPlan for UnionExec {
         Ok(Arc::new(UnionExec::new(children)))
     }
 
-    async fn execute(
-        &self,
-        mut partition: usize,
-        runtime: Arc<RuntimeEnv>,
-    ) -> Result<SendableRecordBatchStream> {
+    async fn execute(&self, mut partition: usize) -> Result<SendableRecordBatchStream> {
         let baseline_metrics = BaselineMetrics::new(&self.metrics, partition);
         // record the tiny amount of work done in this function so
         // elapsed_compute is reported as non zero
@@ -116,7 +111,7 @@ impl ExecutionPlan for UnionExec {
         for input in self.inputs.iter() {
             // Calculate whether partition belongs to the current partition
             if partition < input.output_partitioning().partition_count() {
-                let stream = input.execute(partition, runtime.clone()).await?;
+                let stream = input.execute(partition).await?;
                 return Ok(Box::pin(ObservedStream::new(stream, baseline_metrics)));
             } else {
                 partition -= input.output_partitioning().partition_count();
@@ -155,6 +150,10 @@ impl ExecutionPlan for UnionExec {
 
     fn benefits_from_input_partitioning(&self) -> bool {
         false
+    }
+
+    fn session_id(&self) -> String {
+        self.inputs[0].session_id()
     }
 }
 
@@ -248,13 +247,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_union_partitions() -> Result<()> {
-        let runtime = Arc::new(RuntimeEnv::default());
         let schema = test_util::aggr_test_schema();
         let fs: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem {});
 
         // Create csv's with different partitioning
         let (_, files) = test::create_partitioned_csv("aggregate_test_100.csv", 4)?;
         let (_, files2) = test::create_partitioned_csv("aggregate_test_100.csv", 5)?;
+        let session_id = "sess_123";
 
         let csv = CsvExec::new(
             FileScanConfig {
@@ -268,6 +267,7 @@ mod tests {
             },
             true,
             b',',
+            session_id.to_owned(),
         );
 
         let csv2 = CsvExec::new(
@@ -282,6 +282,7 @@ mod tests {
             },
             true,
             b',',
+            session_id.to_owned(),
         );
 
         let union_exec = Arc::new(UnionExec::new(vec![Arc::new(csv), Arc::new(csv2)]));
@@ -289,7 +290,7 @@ mod tests {
         // Should have 9 partitions and 9 output batches
         assert_eq!(union_exec.output_partitioning().partition_count(), 9);
 
-        let result: Vec<RecordBatch> = collect(union_exec, runtime).await?;
+        let result: Vec<RecordBatch> = collect(union_exec).await?;
         assert_eq!(result.len(), 9);
 
         Ok(())

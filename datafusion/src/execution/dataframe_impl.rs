@@ -17,7 +17,6 @@
 
 //! Implementation of DataFrame API.
 
-use parking_lot::Mutex;
 use std::any::Any;
 use std::sync::Arc;
 
@@ -25,7 +24,7 @@ use crate::arrow::datatypes::Schema;
 use crate::arrow::datatypes::SchemaRef;
 use crate::arrow::record_batch::RecordBatch;
 use crate::error::Result;
-use crate::execution::context::{ExecutionContext, ExecutionContextState};
+use crate::execution::context::SessionState;
 use crate::logical_plan::{
     col, DFSchema, Expr, FunctionRegistry, JoinType, LogicalPlan, LogicalPlanBuilder,
     Partitioning,
@@ -44,28 +43,35 @@ use crate::physical_plan::{
 };
 use crate::sql::utils::find_window_exprs;
 use async_trait::async_trait;
+use parking_lot::Mutex;
 
 /// Implementation of DataFrame API
 pub struct DataFrameImpl {
-    ctx_state: Arc<Mutex<ExecutionContextState>>,
+    session_state: Arc<Mutex<SessionState>>,
     plan: LogicalPlan,
 }
 
 impl DataFrameImpl {
     /// Create a new Table based on an existing logical plan
-    pub fn new(ctx_state: Arc<Mutex<ExecutionContextState>>, plan: &LogicalPlan) -> Self {
+    pub fn new(session_state: Arc<Mutex<SessionState>>, plan: &LogicalPlan) -> Self {
         Self {
-            ctx_state,
+            session_state,
             plan: plan.clone(),
         }
     }
 
     /// Create a physical plan
     async fn create_physical_plan(&self) -> Result<Arc<dyn ExecutionPlan>> {
-        let state = self.ctx_state.lock().clone();
-        let ctx = ExecutionContext::from(Arc::new(Mutex::new(state)));
-        let plan = ctx.optimize(&self.plan)?;
-        ctx.create_physical_plan(&plan).await
+        // We need to clone `state` to release the lock that is not `Send`.
+        // Cloning `state` here is fine as we then pass it as immutable `&state`, which
+        // means that we avoid write consistency issues as the cloned version will not
+        // be written to. As for eventual modifications that would be applied to the
+        // original state after it has been cloned, they will not be picked up by the
+        // clone but that is okay, as it is equivalent to postponing the state update
+        // by keeping the lock until the end of the function scope.
+        let state = self.session_state.lock().clone();
+        let optimized_plan = state.optimize(&self.plan)?;
+        state.create_physical_plan(&optimized_plan).await
     }
 }
 
@@ -89,12 +95,16 @@ impl TableProvider for DataFrameImpl {
         projection: &Option<Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,
+        _session_id: String,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let expr = projection
             .as_ref()
             // construct projections
             .map_or_else(
-                || Ok(Arc::new(Self::new(self.ctx_state.clone(), &self.plan)) as Arc<_>),
+                || {
+                    Ok(Arc::new(Self::new(self.session_state.clone(), &self.plan))
+                        as Arc<_>)
+                },
                 |projection| {
                     let schema = TableProvider::schema(self).project(projection)?;
                     let names = schema
@@ -112,7 +122,7 @@ impl TableProvider for DataFrameImpl {
             ))?;
         // add a limit if given
         Self::new(
-            self.ctx_state.clone(),
+            self.session_state.clone(),
             &limit
                 .map_or_else(|| Ok(expr.clone()), |n| expr.limit(n))?
                 .to_logical_plan(),
@@ -144,7 +154,7 @@ impl DataFrame for DataFrameImpl {
         };
         let project_plan = LogicalPlanBuilder::from(plan).project(expr_list)?.build()?;
         Ok(Arc::new(DataFrameImpl::new(
-            self.ctx_state.clone(),
+            self.session_state.clone(),
             &project_plan,
         )))
     }
@@ -154,7 +164,10 @@ impl DataFrame for DataFrameImpl {
         let plan = LogicalPlanBuilder::from(self.to_logical_plan())
             .filter(predicate)?
             .build()?;
-        Ok(Arc::new(DataFrameImpl::new(self.ctx_state.clone(), &plan)))
+        Ok(Arc::new(DataFrameImpl::new(
+            self.session_state.clone(),
+            &plan,
+        )))
     }
 
     /// Perform an aggregate query
@@ -166,7 +179,10 @@ impl DataFrame for DataFrameImpl {
         let plan = LogicalPlanBuilder::from(self.to_logical_plan())
             .aggregate(group_expr, aggr_expr)?
             .build()?;
-        Ok(Arc::new(DataFrameImpl::new(self.ctx_state.clone(), &plan)))
+        Ok(Arc::new(DataFrameImpl::new(
+            self.session_state.clone(),
+            &plan,
+        )))
     }
 
     /// Limit the number of rows
@@ -174,7 +190,10 @@ impl DataFrame for DataFrameImpl {
         let plan = LogicalPlanBuilder::from(self.to_logical_plan())
             .limit(n)?
             .build()?;
-        Ok(Arc::new(DataFrameImpl::new(self.ctx_state.clone(), &plan)))
+        Ok(Arc::new(DataFrameImpl::new(
+            self.session_state.clone(),
+            &plan,
+        )))
     }
 
     /// Sort by specified sorting expressions
@@ -182,7 +201,10 @@ impl DataFrame for DataFrameImpl {
         let plan = LogicalPlanBuilder::from(self.to_logical_plan())
             .sort(expr)?
             .build()?;
-        Ok(Arc::new(DataFrameImpl::new(self.ctx_state.clone(), &plan)))
+        Ok(Arc::new(DataFrameImpl::new(
+            self.session_state.clone(),
+            &plan,
+        )))
     }
 
     /// Join with another DataFrame
@@ -200,7 +222,10 @@ impl DataFrame for DataFrameImpl {
                 (left_cols.to_vec(), right_cols.to_vec()),
             )?
             .build()?;
-        Ok(Arc::new(DataFrameImpl::new(self.ctx_state.clone(), &plan)))
+        Ok(Arc::new(DataFrameImpl::new(
+            self.session_state.clone(),
+            &plan,
+        )))
     }
 
     fn repartition(
@@ -210,7 +235,10 @@ impl DataFrame for DataFrameImpl {
         let plan = LogicalPlanBuilder::from(self.to_logical_plan())
             .repartition(partitioning_scheme)?
             .build()?;
-        Ok(Arc::new(DataFrameImpl::new(self.ctx_state.clone(), &plan)))
+        Ok(Arc::new(DataFrameImpl::new(
+            self.session_state.clone(),
+            &plan,
+        )))
     }
 
     /// Convert to logical plan
@@ -222,8 +250,7 @@ impl DataFrame for DataFrameImpl {
     /// execute it, collecting all resulting batches into memory
     async fn collect(&self) -> Result<Vec<RecordBatch>> {
         let plan = self.create_physical_plan().await?;
-        let runtime = self.ctx_state.lock().runtime_env.clone();
-        Ok(collect(plan, runtime).await?)
+        Ok(collect(plan).await?)
     }
 
     /// Print results.
@@ -242,8 +269,7 @@ impl DataFrame for DataFrameImpl {
     /// execute it, returning a stream over a single partition
     async fn execute_stream(&self) -> Result<SendableRecordBatchStream> {
         let plan = self.create_physical_plan().await?;
-        let runtime = self.ctx_state.lock().runtime_env.clone();
-        execute_stream(plan, runtime).await
+        execute_stream(plan).await
     }
 
     /// Convert the logical plan represented by this DataFrame into a physical plan and
@@ -251,16 +277,14 @@ impl DataFrame for DataFrameImpl {
     /// partitioning
     async fn collect_partitioned(&self) -> Result<Vec<Vec<RecordBatch>>> {
         let plan = self.create_physical_plan().await?;
-        let runtime = self.ctx_state.lock().runtime_env.clone();
-        Ok(collect_partitioned(plan, runtime).await?)
+        Ok(collect_partitioned(plan).await?)
     }
 
     /// Convert the logical plan represented by this DataFrame into a physical plan and
     /// execute it, returning a stream for each partition
     async fn execute_stream_partitioned(&self) -> Result<Vec<SendableRecordBatchStream>> {
         let plan = self.create_physical_plan().await?;
-        let runtime = self.ctx_state.lock().runtime_env.clone();
-        Ok(execute_stream_partitioned(plan, runtime).await?)
+        Ok(execute_stream_partitioned(plan).await?)
     }
 
     /// Returns the schema from the logical plan
@@ -272,11 +296,14 @@ impl DataFrame for DataFrameImpl {
         let plan = LogicalPlanBuilder::from(self.to_logical_plan())
             .explain(verbose, analyze)?
             .build()?;
-        Ok(Arc::new(DataFrameImpl::new(self.ctx_state.clone(), &plan)))
+        Ok(Arc::new(DataFrameImpl::new(
+            self.session_state.clone(),
+            &plan,
+        )))
     }
 
     fn registry(&self) -> Arc<dyn FunctionRegistry> {
-        let registry = self.ctx_state.lock().clone();
+        let registry = self.session_state.lock().clone();
         Arc::new(registry)
     }
 
@@ -284,12 +311,15 @@ impl DataFrame for DataFrameImpl {
         let plan = LogicalPlanBuilder::from(self.to_logical_plan())
             .union(dataframe.to_logical_plan())?
             .build()?;
-        Ok(Arc::new(DataFrameImpl::new(self.ctx_state.clone(), &plan)))
+        Ok(Arc::new(DataFrameImpl::new(
+            self.session_state.clone(),
+            &plan,
+        )))
     }
 
     fn distinct(&self) -> Result<Arc<dyn DataFrame>> {
         Ok(Arc::new(DataFrameImpl::new(
-            self.ctx_state.clone(),
+            self.session_state.clone(),
             &LogicalPlanBuilder::from(self.to_logical_plan())
                 .distinct()?
                 .build()?,
@@ -300,7 +330,7 @@ impl DataFrame for DataFrameImpl {
         let left_plan = self.to_logical_plan();
         let right_plan = dataframe.to_logical_plan();
         Ok(Arc::new(DataFrameImpl::new(
-            self.ctx_state.clone(),
+            self.session_state.clone(),
             &LogicalPlanBuilder::intersect(left_plan, right_plan, true)?,
         )))
     }
@@ -309,7 +339,7 @@ impl DataFrame for DataFrameImpl {
         let left_plan = self.to_logical_plan();
         let right_plan = dataframe.to_logical_plan();
         Ok(Arc::new(DataFrameImpl::new(
-            self.ctx_state.clone(),
+            self.session_state.clone(),
             &LogicalPlanBuilder::except(left_plan, right_plan, true)?,
         )))
     }
@@ -322,7 +352,7 @@ mod tests {
     use super::*;
     use crate::execution::options::CsvReadOptions;
     use crate::physical_plan::{window_functions, ColumnarValue};
-    use crate::{assert_batches_sorted_eq, execution::context::ExecutionContext};
+    use crate::{assert_batches_sorted_eq, execution::context::SessionContext};
     use crate::{logical_plan::*, test_util};
     use arrow::datatypes::DataType;
     use datafusion_expr::ScalarFunctionImplementation;
@@ -475,8 +505,8 @@ mod tests {
 
     #[tokio::test]
     async fn registry() -> Result<()> {
-        let mut ctx = ExecutionContext::new();
-        register_aggregate_csv(&mut ctx, "aggregate_test_100").await?;
+        let ctx = SessionContext::new();
+        register_aggregate_csv(&ctx, "aggregate_test_100").await?;
 
         // declare the udf
         let my_fn: ScalarFunctionImplementation =
@@ -551,7 +581,7 @@ mod tests {
     #[tokio::test]
     async fn register_table() -> Result<()> {
         let df = test_table().await?.select_columns(&["c1", "c12"])?;
-        let mut ctx = ExecutionContext::new();
+        let ctx = SessionContext::new();
         let df_impl =
             Arc::new(DataFrameImpl::new(ctx.state.clone(), &df.to_logical_plan()));
 
@@ -610,14 +640,14 @@ mod tests {
 
     /// Create a logical plan from a SQL query
     async fn create_plan(sql: &str) -> Result<LogicalPlan> {
-        let mut ctx = ExecutionContext::new();
-        register_aggregate_csv(&mut ctx, "aggregate_test_100").await?;
+        let ctx = SessionContext::new();
+        register_aggregate_csv(&ctx, "aggregate_test_100").await?;
         ctx.create_logical_plan(sql)
     }
 
     async fn test_table_with_name(name: &str) -> Result<Arc<dyn DataFrame + 'static>> {
-        let mut ctx = ExecutionContext::new();
-        register_aggregate_csv(&mut ctx, name).await?;
+        let ctx = SessionContext::new();
+        register_aggregate_csv(&ctx, name).await?;
         ctx.table(name)
     }
 
@@ -626,7 +656,7 @@ mod tests {
     }
 
     async fn register_aggregate_csv(
-        ctx: &mut ExecutionContext,
+        ctx: &SessionContext,
         table_name: &str,
     ) -> Result<()> {
         let schema = test_util::aggr_test_schema();

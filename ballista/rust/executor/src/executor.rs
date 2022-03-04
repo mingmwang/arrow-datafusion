@@ -27,7 +27,6 @@ use datafusion::error::DataFusionError;
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::physical_plan::display::DisplayableExecutionPlan;
 use datafusion::physical_plan::{ExecutionPlan, Partitioning};
-use datafusion::prelude::{ExecutionConfig, ExecutionContext};
 
 /// Ballista executor
 pub struct Executor {
@@ -37,8 +36,8 @@ pub struct Executor {
     /// Directory for storing partial results
     pub work_dir: String,
 
-    /// DataFusion execution context
-    pub ctx: Arc<ExecutionContext>,
+    /// Shared runtime environment for Executor
+    pub runtime: &'static RuntimeEnv,
 }
 
 impl Executor {
@@ -46,12 +45,12 @@ impl Executor {
     pub fn new(
         metadata: ExecutorRegistration,
         work_dir: &str,
-        ctx: Arc<ExecutionContext>,
+        runtime: &'static RuntimeEnv,
     ) -> Self {
         Self {
             metadata,
             work_dir: work_dir.to_owned(),
-            ctx,
+            runtime,
         }
     }
 }
@@ -86,10 +85,7 @@ impl Executor {
             ))
         }?;
 
-        let config = ExecutionConfig::new().with_temp_file_path(self.work_dir.clone());
-        let runtime = Arc::new(RuntimeEnv::new(config.runtime)?);
-
-        let partitions = exec.execute_shuffle_write(part, runtime).await?;
+        let partitions = exec.execute_shuffle_write(part).await?;
 
         println!(
             "=== [{}/{}/{}] Physical plan with metrics ===\n{}\n",

@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use arrow_flight::flight_service_server::FlightServiceServer;
 
+use ballista_core::error::BallistaError;
 use ballista_core::serde::scheduler::ExecutorSpecification;
 use ballista_core::serde::{AsExecutionPlan, AsLogicalPlan, BallistaCodec};
 use ballista_core::{
@@ -27,7 +28,7 @@ use ballista_core::{
     serde::protobuf::{scheduler_grpc_client::SchedulerGrpcClient, ExecutorRegistration},
     BALLISTA_VERSION,
 };
-use datafusion::prelude::ExecutionContext;
+use datafusion::execution::runtime_env::{RuntimeConfig, RuntimeEnv, RUNTIME_ENV};
 use log::info;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
@@ -52,8 +53,10 @@ pub async fn new_standalone_executor<
         BALLISTA_VERSION, addr
     );
 
+    // assign this executor a unique ID
+    let executor_id = Uuid::new_v4().to_string();
     let executor_meta = ExecutorRegistration {
-        id: Uuid::new_v4().to_string(), // assign this executor a unique ID
+        id: executor_id.clone(), // assign this executor a unique ID
         optional_host: Some(OptionalHost::Host("localhost".to_string())),
         port: addr.port() as u32,
         // TODO Make it configurable
@@ -71,8 +74,20 @@ pub async fn new_standalone_executor<
         .into_string()
         .unwrap();
     info!("work_dir: {}", work_dir);
-    let ctx = Arc::new(ExecutionContext::new());
-    let executor = Arc::new(Executor::new(executor_meta, &work_dir, ctx));
+
+    let config = RuntimeConfig::new().with_temp_file_path(work_dir.clone());
+
+    RUNTIME_ENV
+        .set(Arc::new(RuntimeEnv::new_executor_env(config, executor_id)?))
+        .map_err(|_| {
+            BallistaError::Internal("Failed to init Executor RuntimeEnv".to_owned())
+        })?;
+
+    let executor = Arc::new(Executor::new(
+        executor_meta,
+        &work_dir,
+        RuntimeEnv::global(),
+    ));
 
     let service = BallistaFlightService::new(executor.clone());
     let server = FlightServiceServer::new(service);

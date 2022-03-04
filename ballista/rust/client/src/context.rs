@@ -17,6 +17,7 @@
 
 //! Distributed execution context.
 
+use log::info;
 use parking_lot::Mutex;
 use sqlparser::ast::Statement;
 use std::collections::HashMap;
@@ -25,7 +26,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ballista_core::config::BallistaConfig;
-use ballista_core::serde::protobuf::LogicalPlanNode;
+use ballista_core::serde::protobuf::scheduler_grpc_client::SchedulerGrpcClient;
+use ballista_core::serde::protobuf::{ExecuteQueryParams, KeyValuePair, LogicalPlanNode};
 use ballista_core::utils::create_df_ctx_with_ballista_query_planner;
 
 use datafusion::catalog::TableReference;
@@ -33,9 +35,10 @@ use datafusion::dataframe::DataFrame;
 use datafusion::datasource::TableProvider;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::dataframe_impl::DataFrameImpl;
+use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::logical_plan::{CreateExternalTable, LogicalPlan, TableScan};
 use datafusion::prelude::{
-    AvroReadOptions, CsvReadOptions, ExecutionConfig, ExecutionContext,
+    AvroReadOptions, CsvReadOptions, SessionConfig, SessionContext,
 };
 use datafusion::sql::parser::{DFParser, FileType, Statement as DFStatement};
 
@@ -117,16 +120,58 @@ impl BallistaContextState {
 
 pub struct BallistaContext {
     state: Arc<Mutex<BallistaContextState>>,
+    context: Arc<SessionContext>,
 }
 
 impl BallistaContext {
     /// Create a context for executing queries against a remote Ballista scheduler instance
-    pub fn remote(host: &str, port: u16, config: &BallistaConfig) -> Self {
+    pub async fn remote(host: &str, port: u16, config: &BallistaConfig) -> Result<Self> {
         let state = BallistaContextState::new(host.to_owned(), port, config);
+        let scheduler_url =
+            format!("http://{}:{}", &state.scheduler_host, state.scheduler_port);
+        info!(
+            "Connecting to Ballista scheduler at {}",
+            scheduler_url.clone()
+        );
+        let mut scheduler = SchedulerGrpcClient::connect(scheduler_url.clone())
+            .await
+            .map_err(|e| DataFusionError::Execution(format!("{:?}", e)))?;
 
-        Self {
+        let remote_session_id = scheduler
+            .execute_query(ExecuteQueryParams {
+                query: None,
+                settings: config
+                    .settings()
+                    .iter()
+                    .map(|(k, v)| KeyValuePair {
+                        key: k.to_owned(),
+                        value: v.to_owned(),
+                    })
+                    .collect::<Vec<_>>(),
+                optional_session_id: None,
+            })
+            .await
+            .map_err(|e| DataFusionError::Execution(format!("{:?}", e)))?
+            .into_inner()
+            .session_id;
+
+        info!(
+            "Server side SessionContext created with Session id: {}",
+            remote_session_id
+        );
+
+        let ctx = {
+            create_df_ctx_with_ballista_query_planner::<LogicalPlanNode>(
+                scheduler_url,
+                remote_session_id,
+                state.config(),
+            )
+        };
+
+        Ok(Self {
             state: Arc::new(Mutex::new(state)),
-        }
+            context: Arc::new(ctx),
+        })
     }
 
     #[cfg(feature = "standalone")]
@@ -154,15 +199,10 @@ impl BallistaContext {
         let path = fs::canonicalize(&path)?;
 
         // use local DataFusion context for now but later this might call the scheduler
-        let mut ctx = {
-            let guard = self.state.lock();
-            create_df_ctx_with_ballista_query_planner::<LogicalPlanNode>(
-                &guard.scheduler_host,
-                guard.scheduler_port,
-                guard.config(),
-            )
-        };
-        let df = ctx.read_avro(path.to_str().unwrap(), options).await?;
+        let df = self
+            .context
+            .read_avro(path.to_str().unwrap(), options)
+            .await?;
         Ok(df)
     }
 
@@ -174,15 +214,7 @@ impl BallistaContext {
         let path = fs::canonicalize(&path)?;
 
         // use local DataFusion context for now but later this might call the scheduler
-        let mut ctx = {
-            let guard = self.state.lock();
-            create_df_ctx_with_ballista_query_planner::<LogicalPlanNode>(
-                &guard.scheduler_host,
-                guard.scheduler_port,
-                guard.config(),
-            )
-        };
-        let df = ctx.read_parquet(path.to_str().unwrap()).await?;
+        let df = self.context.read_parquet(path.to_str().unwrap()).await?;
         Ok(df)
     }
 
@@ -198,15 +230,10 @@ impl BallistaContext {
         let path = fs::canonicalize(&path)?;
 
         // use local DataFusion context for now but later this might call the scheduler
-        let mut ctx = {
-            let guard = self.state.lock();
-            create_df_ctx_with_ballista_query_planner::<LogicalPlanNode>(
-                &guard.scheduler_host,
-                guard.scheduler_port,
-                guard.config(),
-            )
-        };
-        let df = ctx.read_csv(path.to_str().unwrap(), options).await?;
+        let df = self
+            .context
+            .read_csv(path.to_str().unwrap(), options)
+            .await?;
         Ok(df)
     }
 
@@ -292,34 +319,31 @@ impl BallistaContext {
     /// This method is `async` because queries of type `CREATE EXTERNAL TABLE`
     /// might require the schema to be inferred.
     pub async fn sql(&self, sql: &str) -> Result<Arc<dyn DataFrame>> {
-        let mut ctx = {
-            let state = self.state.lock();
-            create_df_ctx_with_ballista_query_planner::<LogicalPlanNode>(
-                &state.scheduler_host,
-                state.scheduler_port,
-                state.config(),
-            )
-        };
-
+        let mut ctx = self.context.clone();
         let is_show = self.is_show_statement(sql).await?;
         // the show tables、 show columns sql can not run at scheduler because the tables is store at client
         if is_show {
             let state = self.state.lock();
-            ctx = ExecutionContext::with_config(
-                ExecutionConfig::new().with_information_schema(
+            ctx = Arc::new(SessionContext::with_config(
+                SessionConfig::new().with_information_schema(
                     state.config.default_with_information_schema(),
                 ),
-            );
+                RuntimeEnv::global(),
+            ));
         }
 
         // register tables with DataFusion context
         {
             let state = self.state.lock();
             for (name, prov) in &state.tables {
-                ctx.register_table(
-                    TableReference::Bare { table: name },
-                    Arc::clone(prov),
-                )?;
+                // ctx is shared between queries, check table exists or not before register
+                let table_ref = TableReference::Bare { table: name };
+                if !ctx.table_exist(table_ref)? {
+                    ctx.register_table(
+                        TableReference::Bare { table: name },
+                        Arc::clone(prov),
+                    )?;
+                }
             }
         }
 
@@ -342,16 +366,16 @@ impl BallistaContext {
                             .has_header(*has_header),
                     )
                     .await?;
-                    Ok(Arc::new(DataFrameImpl::new(ctx.state, &plan)))
+                    Ok(Arc::new(DataFrameImpl::new(ctx.state.clone(), &plan)))
                 }
                 FileType::Parquet => {
                     self.register_parquet(name, location).await?;
-                    Ok(Arc::new(DataFrameImpl::new(ctx.state, &plan)))
+                    Ok(Arc::new(DataFrameImpl::new(ctx.state.clone(), &plan)))
                 }
                 FileType::Avro => {
                     self.register_avro(name, location, AvroReadOptions::default())
                         .await?;
-                    Ok(Arc::new(DataFrameImpl::new(ctx.state, &plan)))
+                    Ok(Arc::new(DataFrameImpl::new(ctx.state.clone(), &plan)))
                 }
                 _ => Err(DataFusionError::NotImplemented(format!(
                     "Unsupported file type {:?}.",

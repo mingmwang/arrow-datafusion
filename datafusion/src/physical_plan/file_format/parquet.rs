@@ -61,7 +61,6 @@ use tokio::{
     task,
 };
 
-use crate::execution::runtime_env::RuntimeEnv;
 use crate::physical_plan::file_format::SchemaAdapter;
 use async_trait::async_trait;
 
@@ -77,6 +76,8 @@ pub struct ParquetExec {
     metrics: ExecutionPlanMetricsSet,
     /// Optional predicate for pruning row groups
     pruning_predicate: Option<PruningPredicate>,
+    /// Session id
+    session_id: String,
 }
 
 /// Stores metrics about the parquet execution for a particular parquet file
@@ -91,7 +92,11 @@ struct ParquetFileMetrics {
 impl ParquetExec {
     /// Create a new Parquet reader execution plan provided file list and schema.
     /// Even if `limit` is set, ParquetExec rounds up the number of records to the next `batch_size`.
-    pub fn new(base_config: FileScanConfig, predicate: Option<Expr>) -> Self {
+    pub fn new(
+        base_config: FileScanConfig,
+        predicate: Option<Expr>,
+        session_id: String,
+    ) -> Self {
         debug!("Creating ParquetExec, files: {:?}, projection {:?}, predicate: {:?}, limit: {:?}",
         base_config.file_groups, base_config.projection, predicate, base_config.limit);
 
@@ -124,6 +129,7 @@ impl ParquetExec {
             projected_statistics,
             metrics,
             pruning_predicate,
+            session_id,
         }
     }
 
@@ -198,11 +204,7 @@ impl ExecutionPlan for ParquetExec {
         }
     }
 
-    async fn execute(
-        &self,
-        partition_index: usize,
-        runtime: Arc<RuntimeEnv>,
-    ) -> Result<SendableRecordBatchStream> {
+    async fn execute(&self, partition_index: usize) -> Result<SendableRecordBatchStream> {
         // because the parquet implementation is not thread-safe, it is necessary to execute
         // on a thread and communicate with channels
         let (response_tx, response_rx): (
@@ -217,7 +219,7 @@ impl ExecutionPlan for ParquetExec {
             None => (0..self.base_config.file_schema.fields().len()).collect(),
         };
         let pruning_predicate = self.pruning_predicate.clone();
-        let batch_size = runtime.batch_size();
+        let batch_size = self.session_config().batch_size;
         let limit = self.base_config.limit;
         let object_store = Arc::clone(&self.base_config.object_store);
         let partition_col_proj = PartitionColumnProjector::new(
@@ -284,6 +286,10 @@ impl ExecutionPlan for ParquetExec {
 
     fn statistics(&self) -> Statistics {
         self.projected_statistics.clone()
+    }
+
+    fn session_id(&self) -> String {
+        self.session_id.clone()
     }
 }
 
@@ -608,10 +614,10 @@ mod tests {
                 table_partition_cols: vec![],
             },
             None,
+            "sess_123".to_owned(),
         );
 
-        let runtime = Arc::new(RuntimeEnv::default());
-        collect(Arc::new(parquet_exec), runtime).await
+        collect(Arc::new(parquet_exec)).await
     }
 
     // Add a new column with the specified field name to the RecordBatch
@@ -828,7 +834,6 @@ mod tests {
 
     #[tokio::test]
     async fn parquet_exec_with_projection() -> Result<()> {
-        let runtime = Arc::new(RuntimeEnv::default());
         let testdata = crate::test_util::parquet_test_data();
         let filename = format!("{}/alltypes_plain.parquet", testdata);
         let parquet_exec = ParquetExec::new(
@@ -844,10 +849,11 @@ mod tests {
                 table_partition_cols: vec![],
             },
             None,
+            "sess_123".to_owned(),
         );
         assert_eq!(parquet_exec.output_partitioning().partition_count(), 1);
 
-        let mut results = parquet_exec.execute(0, runtime).await?;
+        let mut results = parquet_exec.execute(0).await?;
         let batch = results.next().await.unwrap()?;
 
         assert_eq!(8, batch.num_rows());
@@ -872,7 +878,6 @@ mod tests {
 
     #[tokio::test]
     async fn parquet_exec_with_partition() -> Result<()> {
-        let runtime = Arc::new(RuntimeEnv::default());
         let testdata = crate::test_util::parquet_test_data();
         let filename = format!("{}/alltypes_plain.parquet", testdata);
         let mut partitioned_file = local_unpartitioned_file(filename.clone());
@@ -899,10 +904,11 @@ mod tests {
                 ],
             },
             None,
+            "sess_123".to_owned(),
         );
         assert_eq!(parquet_exec.output_partitioning().partition_count(), 1);
 
-        let mut results = parquet_exec.execute(0, runtime).await?;
+        let mut results = parquet_exec.execute(0).await?;
         let batch = results.next().await.unwrap()?;
         let expected = vec![
             "+----+----------+-------------+-------+",
@@ -928,7 +934,6 @@ mod tests {
 
     #[tokio::test]
     async fn parquet_exec_with_error() -> Result<()> {
-        let runtime = Arc::new(RuntimeEnv::default());
         let testdata = crate::test_util::parquet_test_data();
         let filename = format!("{}/alltypes_plain.parquet", testdata);
         let partitioned_file = PartitionedFile {
@@ -955,9 +960,10 @@ mod tests {
                 table_partition_cols: vec![],
             },
             None,
+            "sess_123".to_owned(),
         );
 
-        let mut results = parquet_exec.execute(0, runtime).await?;
+        let mut results = parquet_exec.execute(0).await?;
         let batch = results.next().await.unwrap();
         // invalid file should produce an error to that effect
         assert_contains!(

@@ -41,7 +41,6 @@ use super::{
     RecordBatchStream, SendableRecordBatchStream, Statistics,
 };
 
-use crate::execution::runtime_env::RuntimeEnv;
 use async_trait::async_trait;
 
 /// Limit execution plan
@@ -131,11 +130,7 @@ impl ExecutionPlan for GlobalLimitExec {
         }
     }
 
-    async fn execute(
-        &self,
-        partition: usize,
-        runtime: Arc<RuntimeEnv>,
-    ) -> Result<SendableRecordBatchStream> {
+    async fn execute(&self, partition: usize) -> Result<SendableRecordBatchStream> {
         // GlobalLimitExec has a single output partition
         if 0 != partition {
             return Err(DataFusionError::Internal(format!(
@@ -152,7 +147,7 @@ impl ExecutionPlan for GlobalLimitExec {
         }
 
         let baseline_metrics = BaselineMetrics::new(&self.metrics, partition);
-        let stream = self.input.execute(0, runtime).await?;
+        let stream = self.input.execute(0).await?;
         Ok(Box::pin(LimitStream::new(
             stream,
             self.limit,
@@ -195,6 +190,10 @@ impl ExecutionPlan for GlobalLimitExec {
             // if we don't know the input size, we can't predict the limit's behaviour
             _ => Statistics::default(),
         }
+    }
+
+    fn session_id(&self) -> String {
+        self.input.session_id()
     }
 }
 
@@ -282,13 +281,9 @@ impl ExecutionPlan for LocalLimitExec {
         }
     }
 
-    async fn execute(
-        &self,
-        partition: usize,
-        runtime: Arc<RuntimeEnv>,
-    ) -> Result<SendableRecordBatchStream> {
+    async fn execute(&self, partition: usize) -> Result<SendableRecordBatchStream> {
         let baseline_metrics = BaselineMetrics::new(&self.metrics, partition);
-        let stream = self.input.execute(partition, runtime).await?;
+        let stream = self.input.execute(partition).await?;
         Ok(Box::pin(LimitStream::new(
             stream,
             self.limit,
@@ -334,6 +329,10 @@ impl ExecutionPlan for LocalLimitExec {
             // if we don't know the input size, we can't predict the limit's behaviour
             _ => Statistics::default(),
         }
+    }
+
+    fn session_id(&self) -> String {
+        self.input.session_id()
     }
 }
 
@@ -436,12 +435,12 @@ mod tests {
 
     #[tokio::test]
     async fn limit() -> Result<()> {
-        let runtime = Arc::new(RuntimeEnv::default());
         let schema = test_util::aggr_test_schema();
 
         let num_partitions = 4;
         let (_, files) =
             test::create_partitioned_csv("aggregate_test_100.csv", num_partitions)?;
+        let session_id = "sess_123";
 
         let csv = CsvExec::new(
             FileScanConfig {
@@ -455,6 +454,7 @@ mod tests {
             },
             true,
             b',',
+            session_id.to_owned(),
         );
 
         // input should have 4 partitions
@@ -464,7 +464,7 @@ mod tests {
             GlobalLimitExec::new(Arc::new(CoalescePartitionsExec::new(Arc::new(csv))), 7);
 
         // the result should contain 4 batches (one per input partition)
-        let iter = limit.execute(0, runtime).await?;
+        let iter = limit.execute(0).await?;
         let batches = common::collect(iter).await?;
 
         // there should be a total of 100 rows

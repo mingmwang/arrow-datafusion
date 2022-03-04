@@ -23,14 +23,11 @@ use arrow::{
     compute::SortOptions,
     record_batch::RecordBatch,
 };
-use datafusion::{
-    execution::runtime_env::{RuntimeConfig, RuntimeEnv},
-    physical_plan::{
-        collect,
-        expressions::{col, PhysicalSortExpr},
-        memory::MemoryExec,
-        sorts::sort_preserving_merge::SortPreservingMergeExec,
-    },
+use datafusion::physical_plan::{
+    collect,
+    expressions::{col, PhysicalSortExpr},
+    memory::MemoryExec,
+    sorts::sort_preserving_merge::SortPreservingMergeExec,
 };
 use fuzz_utils::{add_empty_batches, batches_to_vec, partitions_to_sorted_vec};
 use rand::{prelude::StdRng, Rng, SeedableRng};
@@ -117,13 +114,13 @@ async fn run_merge_test(input: Vec<Vec<RecordBatch>>) {
             },
         }];
 
-        let exec = MemoryExec::try_new(&input, schema, None).unwrap();
+        let exec =
+            MemoryExec::try_new(&input, schema, None, "sess_123".to_owned()).unwrap();
         let merge = Arc::new(SortPreservingMergeExec::new(sort, Arc::new(exec)));
 
-        let runtime_config = RuntimeConfig::new().with_batch_size(batch_size);
+        // let session_config = SessionConfig::new().with_batch_size(batch_size);
 
-        let runtime = Arc::new(RuntimeEnv::new(runtime_config).unwrap());
-        let collected = collect(merge, runtime).await.unwrap();
+        let collected = collect(merge).await.unwrap();
 
         // verify the output batch size: all batches except the last
         // should contain `batch_size` rows

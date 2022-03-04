@@ -27,7 +27,6 @@ use arrow::datatypes::SchemaRef;
 #[cfg(feature = "avro")]
 use arrow::error::ArrowError;
 
-use crate::execution::runtime_env::RuntimeEnv;
 use async_trait::async_trait;
 use std::any::Any;
 use std::sync::Arc;
@@ -42,17 +41,20 @@ pub struct AvroExec {
     base_config: FileScanConfig,
     projected_statistics: Statistics,
     projected_schema: SchemaRef,
+    /// Session id
+    session_id: String,
 }
 
 impl AvroExec {
     /// Create a new Avro reader execution plan provided base configurations
-    pub fn new(base_config: FileScanConfig) -> Self {
+    pub fn new(base_config: FileScanConfig, session_id: String) -> Self {
         let (projected_schema, projected_statistics) = base_config.project();
 
         Self {
             base_config,
             projected_schema,
             projected_statistics,
+            session_id,
         }
     }
     /// Ref to the base configs
@@ -102,25 +104,17 @@ impl ExecutionPlan for AvroExec {
     }
 
     #[cfg(not(feature = "avro"))]
-    async fn execute(
-        &self,
-        _partition: usize,
-        _runtime: Arc<RuntimeEnv>,
-    ) -> Result<SendableRecordBatchStream> {
+    async fn execute(&self, _partition: usize) -> Result<SendableRecordBatchStream> {
         Err(DataFusionError::NotImplemented(
             "Cannot execute avro plan without avro feature enabled".to_string(),
         ))
     }
 
     #[cfg(feature = "avro")]
-    async fn execute(
-        &self,
-        partition: usize,
-        runtime: Arc<RuntimeEnv>,
-    ) -> Result<SendableRecordBatchStream> {
+    async fn execute(&self, partition: usize) -> Result<SendableRecordBatchStream> {
         let proj = self.base_config.projected_file_column_names();
 
-        let batch_size = runtime.batch_size();
+        let batch_size = self.session_config().batch_size;
         let file_schema = Arc::clone(&self.base_config.file_schema);
 
         // The avro reader cannot limit the number of records, so `remaining` is ignored.
@@ -168,6 +162,10 @@ impl ExecutionPlan for AvroExec {
 
     fn statistics(&self) -> Statistics {
         self.projected_statistics.clone()
+    }
+
+    fn session_id(&self) -> String {
+        self.session_id.clone()
     }
 }
 

@@ -51,10 +51,10 @@ use ballista_core::serde::protobuf::{
     scheduler_grpc_server::SchedulerGrpc, task_status, ExecuteQueryParams,
     ExecuteQueryResult, ExecutorHeartbeat, FailedJob, FileType, GetFileMetadataParams,
     GetFileMetadataResult, GetJobStatusParams, GetJobStatusResult, HeartBeatParams,
-    HeartBeatResult, JobStatus, LaunchTaskParams, PartitionId, PollWorkParams,
-    PollWorkResult, QueuedJob, RegisterExecutorParams, RegisterExecutorResult,
-    RunningJob, TaskDefinition, TaskStatus, UpdateTaskStatusParams,
-    UpdateTaskStatusResult,
+    HeartBeatResult, JobStatus, KeyValuePair, LaunchTaskParams, PartitionId,
+    PollWorkParams, PollWorkResult, QueuedJob, RegisterExecutorParams,
+    RegisterExecutorResult, RunningJob, TaskDefinition, TaskStatus,
+    UpdateTaskStatusParams, UpdateTaskStatusResult,
 };
 use ballista_core::serde::scheduler::{ExecutorData, ExecutorMetadata};
 
@@ -101,10 +101,12 @@ use anyhow::Context;
 use ballista_core::config::{BallistaConfig, TaskSchedulingPolicy};
 use ballista_core::error::BallistaError;
 use ballista_core::execution_plans::ShuffleWriterExec;
+use ballista_core::serde::protobuf::execute_query_params::OptionalSessionId;
 use ballista_core::serde::protobuf::executor_grpc_client::ExecutorGrpcClient;
 use ballista_core::serde::scheduler::to_proto::hash_partitioning_to_proto;
 use ballista_core::serde::{AsExecutionPlan, AsLogicalPlan, BallistaCodec};
-use datafusion::prelude::{ExecutionConfig, ExecutionContext};
+use datafusion::execution::runtime_env::RuntimeEnv;
+use datafusion::prelude::{SessionConfig, SessionContext};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, RwLock};
 use tonic::transport::Channel;
@@ -116,14 +118,13 @@ pub struct SchedulerServer<T: 'static + AsLogicalPlan, U: 'static + AsExecutionP
     pub(crate) state: Arc<SchedulerState<T, U>>,
     start_time: u128,
     policy: TaskSchedulingPolicy,
-    scheduler_env: Option<SchedulerEnv>,
+    scheduler_env: Option<SchedulerLoop>,
     executors_client: Option<ExecutorsClient>,
-    ctx: Arc<RwLock<ExecutionContext>>,
     codec: BallistaCodec<T, U>,
 }
 
 #[derive(Clone)]
-pub struct SchedulerEnv {
+pub struct SchedulerLoop {
     pub tx_job: mpsc::Sender<String>,
 }
 
@@ -131,7 +132,6 @@ impl<T: 'static + AsLogicalPlan, U: 'static + AsExecutionPlan> SchedulerServer<T
     pub fn new(
         config: Arc<dyn ConfigBackendClient>,
         namespace: String,
-        ctx: Arc<RwLock<ExecutionContext>>,
         codec: BallistaCodec<T, U>,
     ) -> Self {
         SchedulerServer::new_with_policy(
@@ -139,7 +139,6 @@ impl<T: 'static + AsLogicalPlan, U: 'static + AsExecutionPlan> SchedulerServer<T
             namespace,
             TaskSchedulingPolicy::PullStaged,
             None,
-            ctx,
             codec,
         )
     }
@@ -148,8 +147,7 @@ impl<T: 'static + AsLogicalPlan, U: 'static + AsExecutionPlan> SchedulerServer<T
         config: Arc<dyn ConfigBackendClient>,
         namespace: String,
         policy: TaskSchedulingPolicy,
-        scheduler_env: Option<SchedulerEnv>,
-        ctx: Arc<RwLock<ExecutionContext>>,
+        scheduler_env: Option<SchedulerLoop>,
         codec: BallistaCodec<T, U>,
     ) -> Self {
         let state = Arc::new(SchedulerState::new(config, namespace, codec.clone()));
@@ -168,14 +166,12 @@ impl<T: 'static + AsLogicalPlan, U: 'static + AsExecutionPlan> SchedulerServer<T
             policy,
             scheduler_env,
             executors_client,
-            ctx,
             codec,
         }
     }
 
     pub async fn init(&self) -> Result<(), BallistaError> {
-        let ctx = self.ctx.read().await;
-        self.state.init(&ctx).await?;
+        self.state.init().await?;
 
         Ok(())
     }
@@ -276,6 +272,7 @@ impl<T: 'static + AsLogicalPlan, U: 'static + AsExecutionPlan> SchedulerServer<T
                             )));
                         };
 
+                        let session_props = plan.session_config().to_props();
                         let mut buf: Vec<u8> = vec![];
                         U::try_from_physical_plan(
                             plan,
@@ -289,6 +286,13 @@ impl<T: 'static + AsLogicalPlan, U: 'static + AsExecutionPlan> SchedulerServer<T
                             ))
                         })?;
 
+                        let task_props = session_props
+                            .iter()
+                            .map(|(k, v)| KeyValuePair {
+                                key: k.to_owned(),
+                                value: v.to_owned(),
+                            })
+                            .collect::<Vec<_>>();
                         ret[idx].push(TaskDefinition {
                             plan: buf,
                             task_id: status.task_id,
@@ -296,6 +300,8 @@ impl<T: 'static + AsLogicalPlan, U: 'static + AsExecutionPlan> SchedulerServer<T
                                 output_partitioning,
                             )
                             .map_err(|_| Status::internal("TBD".to_string()))?,
+                            session_id: plan_clone.session_id(),
+                            props: task_props,
                         });
                         executor.available_task_slots -= 1;
                         num_tasks += 1;
@@ -496,6 +502,7 @@ impl<T: 'static + AsLogicalPlan, U: 'static + AsExecutionPlan> SchedulerGrpc
                             )));
                         };
                         let mut buf: Vec<u8> = vec![];
+                        let session_props = plan.session_config().to_props();
                         U::try_from_physical_plan(
                             plan,
                             self.codec.physical_extension_codec(),
@@ -507,6 +514,14 @@ impl<T: 'static + AsLogicalPlan, U: 'static + AsExecutionPlan> SchedulerGrpc
                                 e
                             ))
                         })?;
+
+                        let task_props = session_props
+                            .iter()
+                            .map(|(k, v)| KeyValuePair {
+                                key: k.to_owned(),
+                                value: v.to_owned(),
+                            })
+                            .collect::<Vec<_>>();
                         Ok(Some(TaskDefinition {
                             plan: buf,
                             task_id: status.task_id,
@@ -514,6 +529,8 @@ impl<T: 'static + AsLogicalPlan, U: 'static + AsExecutionPlan> SchedulerGrpc
                                 output_partitioning,
                             )
                             .map_err(|_| Status::internal("TBD".to_string()))?,
+                            session_id: plan_clone.session_id(),
+                            props: task_props,
                         }))
                     }
                     None => Ok(None),
@@ -712,30 +729,47 @@ impl<T: 'static + AsLogicalPlan, U: 'static + AsExecutionPlan> SchedulerGrpc
         &self,
         request: Request<ExecuteQueryParams>,
     ) -> std::result::Result<Response<ExecuteQueryResult>, tonic::Status> {
+        let query_params = request.into_inner();
         if let ExecuteQueryParams {
             query: Some(query),
-            settings: _,
-        } = request.into_inner()
+            settings,
+            optional_session_id,
+        } = query_params
         {
-            let plan = match query {
-                Query::LogicalPlan(message) => {
-                    let ctx = self.ctx.read().await;
-                    T::try_decode(message.as_slice())
-                        .and_then(|m| {
-                            m.try_into_logical_plan(
-                                &ctx,
-                                self.codec.logical_extension_codec(),
-                            )
-                        })
-                        .map_err(|e| {
-                            let msg =
-                                format!("Could not parse logical plan protobuf: {}", e);
-                            error!("{}", msg);
-                            tonic::Status::internal(msg)
-                        })?
+            // parse config
+            let mut config_builder = BallistaConfig::builder();
+            for kv_pair in &settings {
+                config_builder = config_builder.set(&kv_pair.key, &kv_pair.value);
+            }
+            let config = config_builder.build().map_err(|e| {
+                let msg = format!("Could not parse configs: {}", e);
+                error!("{}", msg);
+                tonic::Status::internal(msg)
+            })?;
+
+            let ctx = match optional_session_id {
+                Some(OptionalSessionId::SessionId(session_id)) => {
+                    let session_ctx = RuntimeEnv::global()
+                        .lookup_session(session_id.as_str())
+                        .expect("SessionContext does not exist in RuntimeEnv.");
+                    update_datafusion_session_context(session_ctx, &config)
                 }
+                _ => create_datafusion_session_context(&config),
+            };
+            let plan = match query {
+                Query::LogicalPlan(message) => T::try_decode(message.as_slice())
+                    .and_then(|m| {
+                        m.try_into_logical_plan(
+                            ctx.clone(),
+                            self.codec.logical_extension_codec(),
+                        )
+                    })
+                    .map_err(|e| {
+                        let msg = format!("Could not parse logical plan protobuf: {}", e);
+                        error!("{}", msg);
+                        tonic::Status::internal(msg)
+                    })?,
                 Query::Sql(sql) => {
-                    let mut ctx = self.ctx.write().await;
                     let df = ctx.sql(&sql).await.map_err(|e| {
                         let msg = format!("Error parsing SQL: {}", e);
                         error!("{}", msg);
@@ -775,7 +809,8 @@ impl<T: 'static + AsLogicalPlan, U: 'static + AsExecutionPlan> SchedulerGrpc
                     Some(self.scheduler_env.as_ref().unwrap().tx_job.clone())
                 }
             };
-            let datafusion_ctx = self.ctx.read().await.clone();
+            let session_id = ctx.session_id.clone();
+
             tokio::spawn(async move {
                 // create physical plan using DataFusion
                 macro_rules! fail_job {
@@ -804,18 +839,15 @@ impl<T: 'static + AsLogicalPlan, U: 'static + AsExecutionPlan> SchedulerGrpc
                 }
 
                 let start = Instant::now();
-
-                let optimized_plan =
-                    fail_job!(datafusion_ctx.optimize(&plan).map_err(|e| {
-                        let msg =
-                            format!("Could not create optimized logical plan: {}", e);
-                        error!("{}", msg);
-                        tonic::Status::internal(msg)
-                    }));
+                let optimized_plan = fail_job!(ctx.optimize(&plan).map_err(|e| {
+                    let msg = format!("Could not create optimized logical plan: {}", e);
+                    error!("{}", msg);
+                    tonic::Status::internal(msg)
+                }));
 
                 debug!("Calculated optimized plan: {:?}", optimized_plan);
 
-                let plan = fail_job!(datafusion_ctx
+                let plan = fail_job!(ctx
                     .create_physical_plan(&optimized_plan)
                     .await
                     .map_err(|e| {
@@ -895,7 +927,28 @@ impl<T: 'static + AsLogicalPlan, U: 'static + AsExecutionPlan> SchedulerGrpc
                 }
             });
 
-            Ok(Response::new(ExecuteQueryResult { job_id }))
+            Ok(Response::new(ExecuteQueryResult { job_id, session_id }))
+        } else if let ExecuteQueryParams {
+            query: None,
+            settings,
+            optional_session_id: None,
+        } = query_params
+        {
+            // parse config for new session
+            let mut config_builder = BallistaConfig::builder();
+            for kv_pair in &settings {
+                config_builder = config_builder.set(&kv_pair.key, &kv_pair.value);
+            }
+            let config = config_builder.build().map_err(|e| {
+                let msg = format!("Could not parse configs: {}", e);
+                error!("{}", msg);
+                tonic::Status::internal(msg)
+            })?;
+            let ctx = create_datafusion_session_context(&config);
+            Ok(Response::new(ExecuteQueryResult {
+                job_id: "NA".to_owned(),
+                session_id: ctx.session_id.clone(),
+            }))
         } else {
             Err(tonic::Status::internal("Error parsing request"))
         }
@@ -914,17 +967,41 @@ impl<T: 'static + AsLogicalPlan, U: 'static + AsExecutionPlan> SchedulerGrpc
     }
 }
 
-/// Create a DataFusion context that is compatible with Ballista
-pub fn create_datafusion_context(config: &BallistaConfig) -> ExecutionContext {
-    let config = ExecutionConfig::new()
-        .with_target_partitions(config.default_shuffle_partitions());
-    ExecutionContext::with_config(config)
+/// Create a new DataFusion session context from Ballista Configuration
+pub fn create_datafusion_session_context(config: &BallistaConfig) -> Arc<SessionContext> {
+    let config = SessionConfig::new()
+        .with_target_partitions(config.default_shuffle_partitions())
+        .with_batch_size(config.default_batch_size())
+        .with_repartition_joins(config.repartition_joins())
+        .with_repartition_aggregations(config.repartition_aggregations())
+        .with_repartition_windows(config.repartition_windows())
+        .with_parquet_pruning(config.parquet_pruning());
+    let runtime = RuntimeEnv::global();
+    let session_ctx = Arc::new(SessionContext::with_config(config, runtime));
+    let session_id = session_ctx.session_id.clone();
+    runtime.register_session(session_id, session_ctx.clone());
+    session_ctx
+}
+
+/// Update the existing DataFusion session context with Ballista Configuration
+pub fn update_datafusion_session_context(
+    session_ctx: Arc<SessionContext>,
+    config: &BallistaConfig,
+) -> Arc<SessionContext> {
+    let session_config = session_ctx.state.lock().clone().config;
+    let mut mut_config = session_config.lock();
+    mut_config.target_partitions = config.default_shuffle_partitions();
+    mut_config.batch_size = config.default_batch_size();
+    mut_config.repartition_joins = config.repartition_joins();
+    mut_config.repartition_aggregations = config.repartition_aggregations();
+    mut_config.repartition_windows = config.repartition_windows();
+    mut_config.parquet_pruning = config.parquet_pruning();
+    session_ctx
 }
 
 #[cfg(all(test, feature = "sled"))]
 mod test {
     use std::sync::Arc;
-    use tokio::sync::RwLock;
 
     use tonic::Request;
 
@@ -935,7 +1012,6 @@ mod test {
     };
     use ballista_core::serde::scheduler::ExecutorSpecification;
     use ballista_core::serde::BallistaCodec;
-    use datafusion::prelude::ExecutionContext;
 
     use super::{
         state::{SchedulerState, StandaloneClient},
@@ -950,7 +1026,6 @@ mod test {
             SchedulerServer::new(
                 state_storage.clone(),
                 namespace.to_owned(),
-                Arc::new(RwLock::new(ExecutionContext::new())),
                 BallistaCodec::default(),
             );
         let exec_meta = ExecutorRegistration {
@@ -978,8 +1053,7 @@ mod test {
                 namespace.to_string(),
                 BallistaCodec::default(),
             );
-        let ctx = scheduler.ctx.read().await;
-        state.init(&ctx).await?;
+        state.init().await?;
         // executor should be registered
         assert_eq!(state.get_executors_metadata().await.unwrap().len(), 1);
 
@@ -1001,8 +1075,7 @@ mod test {
                 namespace.to_string(),
                 BallistaCodec::default(),
             );
-        let ctx = scheduler.ctx.read().await;
-        state.init(&ctx).await?;
+        state.init().await?;
         // executor should be registered
         assert_eq!(state.get_executors_metadata().await.unwrap().len(), 1);
         Ok(())

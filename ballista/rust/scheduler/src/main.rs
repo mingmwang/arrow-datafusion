@@ -40,14 +40,15 @@ use ballista_scheduler::state::EtcdClient;
 #[cfg(feature = "sled")]
 use ballista_scheduler::state::StandaloneClient;
 use ballista_scheduler::{
-    state::ConfigBackendClient, ConfigBackend, SchedulerEnv, SchedulerServer,
+    state::ConfigBackendClient, ConfigBackend, SchedulerLoop, SchedulerServer,
     TaskScheduler,
 };
 
 use ballista_core::config::TaskSchedulingPolicy;
+use ballista_core::error::BallistaError;
 use ballista_core::serde::BallistaCodec;
 use log::info;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::mpsc;
 
 #[macro_use]
 extern crate configure_me;
@@ -63,7 +64,7 @@ mod config {
 }
 
 use config::prelude::*;
-use datafusion::prelude::ExecutionContext;
+use datafusion::execution::runtime_env::{RuntimeConfig, RuntimeEnv, RUNTIME_ENV};
 
 async fn start_server(
     config_backend: Arc<dyn ConfigBackendClient>,
@@ -89,8 +90,7 @@ async fn start_server(
                     config_backend.clone(),
                     namespace.clone(),
                     policy,
-                    Some(SchedulerEnv { tx_job }),
-                    Arc::new(RwLock::new(ExecutionContext::new())),
+                    Some(SchedulerLoop { tx_job }),
                     BallistaCodec::default(),
                 );
                 let task_scheduler =
@@ -101,7 +101,6 @@ async fn start_server(
             _ => SchedulerServer::new(
                 config_backend.clone(),
                 namespace.clone(),
-                Arc::new(RwLock::new(ExecutionContext::new())),
                 BallistaCodec::default(),
             ),
         };
@@ -161,6 +160,14 @@ async fn main() -> Result<()> {
         print_version();
         std::process::exit(0);
     }
+
+    RUNTIME_ENV
+        .set(Arc::new(
+            RuntimeEnv::new_scheduler_env(RuntimeConfig::new()).unwrap(),
+        ))
+        .map_err(|_| {
+            BallistaError::Internal("Failed to init Scheduler RuntimeEnv".to_owned())
+        })?;
 
     let namespace = opt.namespace;
     let bind_host = opt.bind_host;

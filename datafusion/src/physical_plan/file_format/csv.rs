@@ -28,7 +28,6 @@ use arrow::datatypes::SchemaRef;
 use std::any::Any;
 use std::sync::Arc;
 
-use crate::execution::runtime_env::RuntimeEnv;
 use async_trait::async_trait;
 
 use super::file_stream::{BatchIter, FileStream};
@@ -42,11 +41,18 @@ pub struct CsvExec {
     projected_schema: SchemaRef,
     has_header: bool,
     delimiter: u8,
+    /// Session id
+    session_id: String,
 }
 
 impl CsvExec {
     /// Create a new CSV reader execution plan provided base and specific configurations
-    pub fn new(base_config: FileScanConfig, has_header: bool, delimiter: u8) -> Self {
+    pub fn new(
+        base_config: FileScanConfig,
+        has_header: bool,
+        delimiter: u8,
+        session_id: String,
+    ) -> Self {
         let (projected_schema, projected_statistics) = base_config.project();
 
         Self {
@@ -55,6 +61,7 @@ impl CsvExec {
             projected_statistics,
             has_header,
             delimiter,
+            session_id,
         }
     }
 
@@ -116,12 +123,8 @@ impl ExecutionPlan for CsvExec {
         }
     }
 
-    async fn execute(
-        &self,
-        partition: usize,
-        runtime: Arc<RuntimeEnv>,
-    ) -> Result<SendableRecordBatchStream> {
-        let batch_size = runtime.batch_size();
+    async fn execute(&self, partition: usize) -> Result<SendableRecordBatchStream> {
+        let batch_size = self.session_config().batch_size;
         let file_schema = Arc::clone(&self.base_config.file_schema);
         let file_projection = self.base_config.file_column_projection_indices();
         let has_header = self.has_header;
@@ -174,6 +177,10 @@ impl ExecutionPlan for CsvExec {
     fn statistics(&self) -> Statistics {
         self.projected_statistics.clone()
     }
+
+    fn session_id(&self) -> String {
+        self.session_id.clone()
+    }
 }
 
 #[cfg(test)]
@@ -189,7 +196,6 @@ mod tests {
 
     #[tokio::test]
     async fn csv_exec_with_projection() -> Result<()> {
-        let runtime = Arc::new(RuntimeEnv::default());
         let file_schema = aggr_test_schema();
         let testdata = crate::test_util::arrow_test_data();
         let filename = "aggregate_test_100.csv";
@@ -206,12 +212,13 @@ mod tests {
             },
             true,
             b',',
+            "sess_123".to_owned(),
         );
         assert_eq!(13, csv.base_config.file_schema.fields().len());
         assert_eq!(3, csv.projected_schema.fields().len());
         assert_eq!(3, csv.schema().fields().len());
 
-        let mut stream = csv.execute(0, runtime).await?;
+        let mut stream = csv.execute(0).await?;
         let batch = stream.next().await.unwrap()?;
         assert_eq!(3, batch.num_columns());
         assert_eq!(100, batch.num_rows());
@@ -235,7 +242,6 @@ mod tests {
 
     #[tokio::test]
     async fn csv_exec_with_limit() -> Result<()> {
-        let runtime = Arc::new(RuntimeEnv::default());
         let file_schema = aggr_test_schema();
         let testdata = crate::test_util::arrow_test_data();
         let filename = "aggregate_test_100.csv";
@@ -252,12 +258,13 @@ mod tests {
             },
             true,
             b',',
+            "sess_123".to_owned(),
         );
         assert_eq!(13, csv.base_config.file_schema.fields().len());
         assert_eq!(13, csv.projected_schema.fields().len());
         assert_eq!(13, csv.schema().fields().len());
 
-        let mut it = csv.execute(0, runtime).await?;
+        let mut it = csv.execute(0).await?;
         let batch = it.next().await.unwrap()?;
         assert_eq!(13, batch.num_columns());
         assert_eq!(5, batch.num_rows());
@@ -281,7 +288,6 @@ mod tests {
 
     #[tokio::test]
     async fn csv_exec_with_missing_column() -> Result<()> {
-        let runtime = Arc::new(RuntimeEnv::default());
         let file_schema = aggr_test_schema_with_missing_col();
         let testdata = crate::test_util::arrow_test_data();
         let filename = "aggregate_test_100.csv";
@@ -298,12 +304,13 @@ mod tests {
             },
             true,
             b',',
+            "sess_123".to_owned(),
         );
         assert_eq!(14, csv.base_config.file_schema.fields().len());
         assert_eq!(14, csv.projected_schema.fields().len());
         assert_eq!(14, csv.schema().fields().len());
 
-        let mut it = csv.execute(0, runtime).await?;
+        let mut it = csv.execute(0).await?;
         let batch = it.next().await.unwrap()?;
         assert_eq!(14, batch.num_columns());
         assert_eq!(5, batch.num_rows());
@@ -327,7 +334,6 @@ mod tests {
 
     #[tokio::test]
     async fn csv_exec_with_partition() -> Result<()> {
-        let runtime = Arc::new(RuntimeEnv::default());
         let file_schema = aggr_test_schema();
         let testdata = crate::test_util::arrow_test_data();
         let filename = "aggregate_test_100.csv";
@@ -351,12 +357,13 @@ mod tests {
             },
             true,
             b',',
+            "sess_123".to_owned(),
         );
         assert_eq!(13, csv.base_config.file_schema.fields().len());
         assert_eq!(2, csv.projected_schema.fields().len());
         assert_eq!(2, csv.schema().fields().len());
 
-        let mut it = csv.execute(0, runtime).await?;
+        let mut it = csv.execute(0).await?;
         let batch = it.next().await.unwrap()?;
         assert_eq!(2, batch.num_columns());
         assert_eq!(100, batch.num_rows());

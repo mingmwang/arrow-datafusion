@@ -29,6 +29,7 @@ use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::datasource::file_format::FileFormat;
 use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig};
 
+use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::logical_plan::plan::{
     Aggregate, EmptyRelation, Filter, Join, Projection, Sort, Window,
 };
@@ -36,7 +37,7 @@ use datafusion::logical_plan::{
     Column, CreateExternalTable, CrossJoin, Expr, JoinConstraint, Limit, LogicalPlan,
     LogicalPlanBuilder, Repartition, TableScan, Values,
 };
-use datafusion::prelude::ExecutionContext;
+use datafusion::prelude::SessionContext;
 
 use prost::bytes::BufMut;
 use prost::Message;
@@ -71,7 +72,7 @@ impl AsLogicalPlan for LogicalPlanNode {
 
     fn try_into_logical_plan(
         &self,
-        ctx: &ExecutionContext,
+        ctx: Arc<SessionContext>,
         extension_codec: &dyn LogicalExtensionCodec,
     ) -> Result<LogicalPlan, BallistaError> {
         let plan = self.logical_plan_type.as_ref().ok_or_else(|| {
@@ -108,7 +109,7 @@ impl AsLogicalPlan for LogicalPlanNode {
             }
             LogicalPlanType::Projection(projection) => {
                 let input: LogicalPlan =
-                    into_logical_plan!(projection.input, &ctx, extension_codec)?;
+                    into_logical_plan!(projection.input, ctx, extension_codec)?;
                 let x: Vec<Expr> = projection
                     .expr
                     .iter()
@@ -128,7 +129,7 @@ impl AsLogicalPlan for LogicalPlanNode {
             }
             LogicalPlanType::Selection(selection) => {
                 let input: LogicalPlan =
-                    into_logical_plan!(selection.input, &ctx, extension_codec)?;
+                    into_logical_plan!(selection.input, ctx, extension_codec)?;
                 let expr: Expr = selection
                     .expr
                     .as_ref()
@@ -143,7 +144,7 @@ impl AsLogicalPlan for LogicalPlanNode {
             }
             LogicalPlanType::Window(window) => {
                 let input: LogicalPlan =
-                    into_logical_plan!(window.input, &ctx, extension_codec)?;
+                    into_logical_plan!(window.input, ctx, extension_codec)?;
                 let window_expr = window
                     .window_expr
                     .iter()
@@ -156,7 +157,7 @@ impl AsLogicalPlan for LogicalPlanNode {
             }
             LogicalPlanType::Aggregate(aggregate) => {
                 let input: LogicalPlan =
-                    into_logical_plan!(aggregate.input, &ctx, extension_codec)?;
+                    into_logical_plan!(aggregate.input, ctx, extension_codec)?;
                 let group_expr = aggregate
                     .group_expr
                     .iter()
@@ -222,7 +223,7 @@ impl AsLogicalPlan for LogicalPlanNode {
                     target_partitions: scan.target_partitions as usize,
                 };
 
-                let object_store = ctx
+                let object_store = RuntimeEnv::global()
                     .object_store(scan.path.as_str())
                     .map_err(|e| {
                         BallistaError::NotImplemented(format!(
@@ -255,7 +256,7 @@ impl AsLogicalPlan for LogicalPlanNode {
             }
             LogicalPlanType::Sort(sort) => {
                 let input: LogicalPlan =
-                    into_logical_plan!(sort.input, &ctx, extension_codec)?;
+                    into_logical_plan!(sort.input, ctx, extension_codec)?;
                 let sort_expr: Vec<Expr> = sort
                     .expr
                     .iter()
@@ -269,7 +270,7 @@ impl AsLogicalPlan for LogicalPlanNode {
             LogicalPlanType::Repartition(repartition) => {
                 use datafusion::logical_plan::Partitioning;
                 let input: LogicalPlan =
-                    into_logical_plan!(repartition.input, &ctx, extension_codec)?;
+                    into_logical_plan!(repartition.input, ctx, extension_codec)?;
                 use protobuf::repartition_node::PartitionMethod;
                 let pb_partition_method = repartition.partition_method.clone().ok_or_else(|| {
                     BallistaError::General(String::from(
@@ -323,7 +324,7 @@ impl AsLogicalPlan for LogicalPlanNode {
             }
             LogicalPlanType::Analyze(analyze) => {
                 let input: LogicalPlan =
-                    into_logical_plan!(analyze.input, &ctx, extension_codec)?;
+                    into_logical_plan!(analyze.input, ctx, extension_codec)?;
                 LogicalPlanBuilder::from(input)
                     .explain(analyze.verbose, true)?
                     .build()
@@ -331,7 +332,7 @@ impl AsLogicalPlan for LogicalPlanNode {
             }
             LogicalPlanType::Explain(explain) => {
                 let input: LogicalPlan =
-                    into_logical_plan!(explain.input, &ctx, extension_codec)?;
+                    into_logical_plan!(explain.input, ctx, extension_codec)?;
                 LogicalPlanBuilder::from(input)
                     .explain(explain.verbose, false)?
                     .build()
@@ -339,7 +340,7 @@ impl AsLogicalPlan for LogicalPlanNode {
             }
             LogicalPlanType::Limit(limit) => {
                 let input: LogicalPlan =
-                    into_logical_plan!(limit.input, &ctx, extension_codec)?;
+                    into_logical_plan!(limit.input, ctx, extension_codec)?;
                 LogicalPlanBuilder::from(input)
                     .limit(limit.limit as usize)?
                     .build()
@@ -369,17 +370,17 @@ impl AsLogicalPlan for LogicalPlanNode {
 
                 let builder = LogicalPlanBuilder::from(into_logical_plan!(
                     join.left,
-                    &ctx,
+                    ctx.clone(),
                     extension_codec
                 )?);
                 let builder = match join_constraint.into() {
                     JoinConstraint::On => builder.join(
-                        &into_logical_plan!(join.right, &ctx, extension_codec)?,
+                        &into_logical_plan!(join.right, ctx, extension_codec)?,
                         join_type.into(),
                         (left_keys, right_keys),
                     )?,
                     JoinConstraint::Using => builder.join_using(
-                        &into_logical_plan!(join.right, &ctx, extension_codec)?,
+                        &into_logical_plan!(join.right, ctx, extension_codec)?,
                         join_type.into(),
                         left_keys,
                     )?,
@@ -388,8 +389,9 @@ impl AsLogicalPlan for LogicalPlanNode {
                 builder.build().map_err(|e| e.into())
             }
             LogicalPlanType::CrossJoin(crossjoin) => {
-                let left = into_logical_plan!(crossjoin.left, &ctx, extension_codec)?;
-                let right = into_logical_plan!(crossjoin.right, &ctx, extension_codec)?;
+                let left =
+                    into_logical_plan!(crossjoin.left, ctx.clone(), extension_codec)?;
+                let right = into_logical_plan!(crossjoin.right, ctx, extension_codec)?;
 
                 LogicalPlanBuilder::from(left)
                     .cross_join(&right)?
@@ -399,7 +401,7 @@ impl AsLogicalPlan for LogicalPlanNode {
             LogicalPlanType::Extension(LogicalExtensionNode { node, inputs }) => {
                 let input_plans: Vec<LogicalPlan> = inputs
                     .iter()
-                    .map(|i| i.try_into_logical_plan(ctx, extension_codec))
+                    .map(|i| i.try_into_logical_plan(ctx.clone(), extension_codec))
                     .collect::<Result<_, BallistaError>>()?;
 
                 let extension_node = extension_codec.try_decode(node, &input_plans)?;
@@ -833,7 +835,7 @@ impl AsLogicalPlan for LogicalPlanNode {
 macro_rules! into_logical_plan {
     ($PB:expr, $CTX:expr, $CODEC:expr) => {{
         if let Some(field) = $PB.as_ref() {
-            field.as_ref().try_into_logical_plan(&$CTX, $CODEC)
+            field.as_ref().try_into_logical_plan($CTX, $CODEC)
         } else {
             Err(proto_error("Missing required field in protobuf"))
         }
@@ -866,6 +868,7 @@ mod roundtrip_tests {
         sql::parser::FileType,
     };
 
+    use datafusion::execution::runtime_env::RuntimeEnv;
     use std::{convert::TryInto, sync::Arc};
 
     #[derive(Debug)]
@@ -918,7 +921,7 @@ mod roundtrip_tests {
             roundtrip_test!($initial_struct, protobuf::LogicalPlanNode, $struct_type);
         };
         ($initial_struct:ident) => {
-            let ctx = ExecutionContext::new();
+            let ctx = SessionContext::new();
             let codec: BallistaCodec<
                 protobuf::LogicalPlanNode,
                 protobuf::PhysicalPlanNode,
@@ -930,7 +933,7 @@ mod roundtrip_tests {
                 )
                 .expect("from logical plan");
             let round_trip: LogicalPlan = proto
-                .try_into_logical_plan(&ctx, codec.logical_extension_codec())
+                .try_into_logical_plan(Arc::new(ctx), codec.logical_extension_codec())
                 .expect("to logical plan");
 
             assert_eq!(
@@ -947,7 +950,7 @@ mod roundtrip_tests {
                 protobuf::LogicalPlanNode::try_from_logical_plan(&$initial_struct)
                     .expect("from logical plan");
             let round_trip: LogicalPlan = proto
-                .try_into_logical_plan(&$ctx, codec.logical_extension_codec())
+                .try_into_logical_plan($ctx, codec.logical_extension_codec())
                 .expect("to logical plan");
 
             assert_eq!(
@@ -1776,13 +1779,13 @@ mod roundtrip_tests {
 
     #[tokio::test]
     async fn roundtrip_logical_plan_custom_ctx() -> Result<()> {
-        let ctx = ExecutionContext::new();
+        let ctx = SessionContext::new();
         let codec: BallistaCodec<protobuf::LogicalPlanNode, protobuf::PhysicalPlanNode> =
             BallistaCodec::default();
         let custom_object_store = Arc::new(TestObjectStore {});
-        ctx.register_object_store("test", custom_object_store.clone());
+        RuntimeEnv::global().register_object_store("test", custom_object_store.clone());
 
-        let (os, _) = ctx.object_store("test://foo.csv")?;
+        let (os, _) = RuntimeEnv::global().object_store("test://foo.csv")?;
 
         println!("Object Store {:?}", os);
 
@@ -1812,7 +1815,7 @@ mod roundtrip_tests {
             )
             .expect("from logical plan");
         let round_trip: LogicalPlan = proto
-            .try_into_logical_plan(&ctx, codec.logical_extension_codec())
+            .try_into_logical_plan(Arc::new(ctx), codec.logical_extension_codec())
             .expect("to logical plan");
 
         assert_eq!(format!("{:?}", plan), format!("{:?}", round_trip));

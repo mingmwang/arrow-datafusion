@@ -23,7 +23,7 @@ use self::{
     coalesce_partitions::CoalescePartitionsExec, display::DisplayableExecutionPlan,
 };
 use crate::physical_plan::expressions::PhysicalSortExpr;
-use crate::{error::Result, execution::runtime_env::RuntimeEnv, scalar::ScalarValue};
+use crate::{error::Result, scalar::ScalarValue};
 
 use arrow::datatypes::SchemaRef;
 use arrow::error::Result as ArrowResult;
@@ -223,11 +223,7 @@ pub trait ExecutionPlan: Debug + Send + Sync {
     ) -> Result<Arc<dyn ExecutionPlan>>;
 
     /// creates an iterator
-    async fn execute(
-        &self,
-        partition: usize,
-        runtime: Arc<RuntimeEnv>,
-    ) -> Result<SendableRecordBatchStream>;
+    async fn execute(&self, partition: usize) -> Result<SendableRecordBatchStream>;
 
     /// Return a snapshot of the set of [`Metric`]s for this
     /// [`ExecutionPlan`].
@@ -256,6 +252,16 @@ pub trait ExecutionPlan: Debug + Send + Sync {
 
     /// Returns the global output statistics for this `ExecutionPlan` node.
     fn statistics(&self) -> Statistics;
+
+    /// Return the Session id associated with the execution plan.
+    fn session_id(&self) -> String;
+
+    /// Return the Session configuration associated with the execution plan.
+    fn session_config(&self) -> SessionConfig {
+        let session_id = self.session_id();
+        let runtime = RuntimeEnv::global();
+        runtime.lookup_session_config(session_id.as_str())
+    }
 }
 
 /// Return a [wrapper](DisplayableExecutionPlan) around an
@@ -263,15 +269,16 @@ pub trait ExecutionPlan: Debug + Send + Sync {
 /// understand ways.
 ///
 /// ```
+/// use datafusion::execution::runtime_env::RuntimeEnv;
 /// use datafusion::prelude::*;
 /// use datafusion::physical_plan::displayable;
 ///
 /// #[tokio::main]
 /// async fn main() {
 ///   // Hard code target_partitions as it appears in the RepartitionExec output
-///   let config = ExecutionConfig::new()
+///   let config = SessionConfig::new()
 ///       .with_target_partitions(3);
-///   let mut ctx = ExecutionContext::with_config(config);
+///   let ctx = SessionContext::with_config(config, RuntimeEnv::global());
 ///
 ///   // register the a table
 ///   ctx.register_csv("example", "tests/example.csv", CsvReadOptions::new()).await.unwrap();
@@ -383,28 +390,24 @@ pub fn visit_execution_plan<V: ExecutionPlanVisitor>(
 }
 
 /// Execute the [ExecutionPlan] and collect the results in memory
-pub async fn collect(
-    plan: Arc<dyn ExecutionPlan>,
-    runtime: Arc<RuntimeEnv>,
-) -> Result<Vec<RecordBatch>> {
-    let stream = execute_stream(plan, runtime).await?;
+pub async fn collect(plan: Arc<dyn ExecutionPlan>) -> Result<Vec<RecordBatch>> {
+    let stream = execute_stream(plan).await?;
     common::collect(stream).await
 }
 
 /// Execute the [ExecutionPlan] and return a single stream of results
 pub async fn execute_stream(
     plan: Arc<dyn ExecutionPlan>,
-    runtime: Arc<RuntimeEnv>,
 ) -> Result<SendableRecordBatchStream> {
     match plan.output_partitioning().partition_count() {
         0 => Ok(Box::pin(EmptyRecordBatchStream::new(plan.schema()))),
-        1 => plan.execute(0, runtime).await,
+        1 => plan.execute(0).await,
         _ => {
             // merge into a single partition
             let plan = CoalescePartitionsExec::new(plan.clone());
             // CoalescePartitionsExec must produce a single partition
             assert_eq!(1, plan.output_partitioning().partition_count());
-            plan.execute(0, runtime).await
+            plan.execute(0).await
         }
     }
 }
@@ -412,9 +415,8 @@ pub async fn execute_stream(
 /// Execute the [ExecutionPlan] and collect the results in memory
 pub async fn collect_partitioned(
     plan: Arc<dyn ExecutionPlan>,
-    runtime: Arc<RuntimeEnv>,
 ) -> Result<Vec<Vec<RecordBatch>>> {
-    let streams = execute_stream_partitioned(plan, runtime).await?;
+    let streams = execute_stream_partitioned(plan).await?;
     let mut batches = Vec::with_capacity(streams.len());
     for stream in streams {
         batches.push(common::collect(stream).await?);
@@ -425,12 +427,11 @@ pub async fn collect_partitioned(
 /// Execute the [ExecutionPlan] and return a vec with one stream per output partition
 pub async fn execute_stream_partitioned(
     plan: Arc<dyn ExecutionPlan>,
-    runtime: Arc<RuntimeEnv>,
 ) -> Result<Vec<SendableRecordBatchStream>> {
     let num_partitions = plan.output_partitioning().partition_count();
     let mut streams = Vec::with_capacity(num_partitions);
     for i in 0..num_partitions {
-        streams.push(plan.execute(i, runtime.clone()).await?);
+        streams.push(plan.execute(i).await?);
     }
     Ok(streams)
 }
@@ -469,6 +470,8 @@ pub enum Distribution {
     HashPartitioned(Vec<Arc<dyn PhysicalExpr>>),
 }
 
+use crate::execution::runtime_env::RuntimeEnv;
+use crate::prelude::SessionConfig;
 pub use datafusion_physical_expr::window::WindowExpr;
 pub use datafusion_physical_expr::{AggregateExpr, PhysicalExpr};
 

@@ -42,7 +42,6 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::{DataFusionError, Result};
-use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::physical_plan::common::IPCWriter;
 use datafusion::physical_plan::hash_utils::create_hashes;
 use datafusion::physical_plan::memory::MemoryStream;
@@ -138,11 +137,10 @@ impl ShuffleWriterExec {
     pub async fn execute_shuffle_write(
         &self,
         input_partition: usize,
-        runtime: Arc<RuntimeEnv>,
     ) -> Result<Vec<ShuffleWritePartition>> {
         let now = Instant::now();
 
-        let mut stream = self.plan.execute(input_partition, runtime).await?;
+        let mut stream = self.plan.execute(input_partition).await?;
 
         let mut path = PathBuf::from(&self.work_dir);
         path.push(&self.job_id);
@@ -355,12 +353,8 @@ impl ExecutionPlan for ShuffleWriterExec {
         )?))
     }
 
-    async fn execute(
-        &self,
-        partition: usize,
-        runtime: Arc<RuntimeEnv>,
-    ) -> Result<SendableRecordBatchStream> {
-        let part_loc = self.execute_shuffle_write(partition, runtime).await?;
+    async fn execute(&self, partition: usize) -> Result<SendableRecordBatchStream> {
+        let part_loc = self.execute_shuffle_write(partition).await?;
 
         // build metadata result batch
         let num_writers = part_loc.len();
@@ -429,6 +423,10 @@ impl ExecutionPlan for ShuffleWriterExec {
     fn statistics(&self) -> Statistics {
         self.plan.statistics()
     }
+
+    fn session_id(&self) -> String {
+        self.plan.session_id()
+    }
 }
 
 fn result_schema() -> SchemaRef {
@@ -452,8 +450,6 @@ mod tests {
 
     #[tokio::test]
     async fn test() -> Result<()> {
-        let runtime = Arc::new(RuntimeEnv::default());
-
         let input_plan = Arc::new(CoalescePartitionsExec::new(create_input_plan()?));
         let work_dir = TempDir::new()?;
         let query_stage = ShuffleWriterExec::try_new(
@@ -463,7 +459,7 @@ mod tests {
             work_dir.into_path().to_str().unwrap().to_owned(),
             Some(Partitioning::Hash(vec![Arc::new(Column::new("a", 0))], 2)),
         )?;
-        let mut stream = query_stage.execute(0, runtime).await?;
+        let mut stream = query_stage.execute(0).await?;
         let batches = utils::collect_stream(&mut stream)
             .await
             .map_err(|e| DataFusionError::Execution(format!("{:?}", e)))?;
@@ -506,8 +502,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_partitioned() -> Result<()> {
-        let runtime = Arc::new(RuntimeEnv::default());
-
         let input_plan = create_input_plan()?;
         let work_dir = TempDir::new()?;
         let query_stage = ShuffleWriterExec::try_new(
@@ -517,7 +511,7 @@ mod tests {
             work_dir.into_path().to_str().unwrap().to_owned(),
             Some(Partitioning::Hash(vec![Arc::new(Column::new("a", 0))], 2)),
         )?;
-        let mut stream = query_stage.execute(0, runtime).await?;
+        let mut stream = query_stage.execute(0).await?;
         let batches = utils::collect_stream(&mut stream)
             .await
             .map_err(|e| DataFusionError::Execution(format!("{:?}", e)))?;
@@ -557,6 +551,11 @@ mod tests {
         )?;
         let partition = vec![batch.clone(), batch];
         let partitions = vec![partition.clone(), partition];
-        Ok(Arc::new(MemoryExec::try_new(&partitions, schema, None)?))
+        Ok(Arc::new(MemoryExec::try_new(
+            &partitions,
+            schema,
+            None,
+            "sess_123".to_owned(),
+        )?))
     }
 }

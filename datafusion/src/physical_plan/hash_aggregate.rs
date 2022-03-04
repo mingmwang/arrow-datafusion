@@ -48,7 +48,6 @@ use arrow::{
 use hashbrown::raw::RawTable;
 use pin_project_lite::pin_project;
 
-use crate::execution::runtime_env::RuntimeEnv;
 use async_trait::async_trait;
 
 use super::common::AbortOnDropSingle;
@@ -230,12 +229,8 @@ impl ExecutionPlan for HashAggregateExec {
         false
     }
 
-    async fn execute(
-        &self,
-        partition: usize,
-        runtime: Arc<RuntimeEnv>,
-    ) -> Result<SendableRecordBatchStream> {
-        let input = self.input.execute(partition, runtime).await?;
+    async fn execute(&self, partition: usize) -> Result<SendableRecordBatchStream> {
+        let input = self.input.execute(partition).await?;
         let group_expr = self.group_expr.iter().map(|x| x.0.clone()).collect();
 
         let baseline_metrics = BaselineMetrics::new(&self.metrics, partition);
@@ -333,6 +328,10 @@ impl ExecutionPlan for HashAggregateExec {
             }
             _ => Statistics::default(),
         }
+    }
+
+    fn session_id(&self) -> String {
+        self.input.session_id()
     }
 }
 
@@ -1076,8 +1075,6 @@ mod tests {
             DataType::Float64,
         ))];
 
-        let runtime = Arc::new(RuntimeEnv::default());
-
         let partial_aggregate = Arc::new(HashAggregateExec::try_new(
             AggregateMode::Partial,
             groups.clone(),
@@ -1086,8 +1083,7 @@ mod tests {
             input_schema.clone(),
         )?);
 
-        let result =
-            common::collect(partial_aggregate.execute(0, runtime.clone()).await?).await?;
+        let result = common::collect(partial_aggregate.execute(0).await?).await?;
 
         let expected = vec![
             "+---+---------------+-------------+",
@@ -1118,8 +1114,7 @@ mod tests {
             input_schema,
         )?);
 
-        let result =
-            common::collect(merged_aggregate.execute(0, runtime.clone()).await?).await?;
+        let result = common::collect(merged_aggregate.execute(0).await?).await?;
         assert_eq!(result.len(), 1);
 
         let batch = &result[0];
@@ -1151,6 +1146,8 @@ mod tests {
     struct TestYieldingExec {
         /// True if this exec should yield back to runtime the first time it is polled
         pub yield_first: bool,
+        /// Session id
+        session_id: String,
     }
 
     #[async_trait]
@@ -1184,11 +1181,7 @@ mod tests {
             )))
         }
 
-        async fn execute(
-            &self,
-            _partition: usize,
-            _runtime: Arc<RuntimeEnv>,
-        ) -> Result<SendableRecordBatchStream> {
+        async fn execute(&self, _partition: usize) -> Result<SendableRecordBatchStream> {
             let stream = if self.yield_first {
                 TestYieldingStream::New
             } else {
@@ -1201,6 +1194,10 @@ mod tests {
         fn statistics(&self) -> Statistics {
             let (_, batches) = some_data();
             common::compute_record_batch_statistics(&[batches], &self.schema(), None)
+        }
+
+        fn session_id(&self) -> String {
+            self.session_id.clone()
         }
     }
 
@@ -1248,23 +1245,26 @@ mod tests {
 
     #[tokio::test]
     async fn aggregate_source_not_yielding() -> Result<()> {
-        let input: Arc<dyn ExecutionPlan> =
-            Arc::new(TestYieldingExec { yield_first: false });
+        let input: Arc<dyn ExecutionPlan> = Arc::new(TestYieldingExec {
+            yield_first: false,
+            session_id: "sess_123".to_owned(),
+        });
 
         check_aggregates(input).await
     }
 
     #[tokio::test]
     async fn aggregate_source_with_yielding() -> Result<()> {
-        let input: Arc<dyn ExecutionPlan> =
-            Arc::new(TestYieldingExec { yield_first: true });
+        let input: Arc<dyn ExecutionPlan> = Arc::new(TestYieldingExec {
+            yield_first: true,
+            session_id: "sess_123".to_owned(),
+        });
 
         check_aggregates(input).await
     }
 
     #[tokio::test]
     async fn test_drop_cancel_without_groups() -> Result<()> {
-        let runtime = Arc::new(RuntimeEnv::default());
         let schema =
             Arc::new(Schema::new(vec![Field::new("a", DataType::Float32, true)]));
 
@@ -1276,7 +1276,12 @@ mod tests {
             DataType::Float64,
         ))];
 
-        let blocking_exec = Arc::new(BlockingExec::new(Arc::clone(&schema), 1));
+        let session_id = "sess_123";
+        let blocking_exec = Arc::new(BlockingExec::new(
+            Arc::clone(&schema),
+            1,
+            session_id.to_owned(),
+        ));
         let refs = blocking_exec.refs();
         let hash_aggregate_exec = Arc::new(HashAggregateExec::try_new(
             AggregateMode::Partial,
@@ -1286,7 +1291,7 @@ mod tests {
             schema,
         )?);
 
-        let fut = crate::physical_plan::collect(hash_aggregate_exec, runtime);
+        let fut = crate::physical_plan::collect(hash_aggregate_exec);
         let mut fut = fut.boxed();
 
         assert_is_pending(&mut fut);
@@ -1298,7 +1303,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_drop_cancel_with_groups() -> Result<()> {
-        let runtime = Arc::new(RuntimeEnv::default());
         let schema = Arc::new(Schema::new(vec![
             Field::new("a", DataType::Float32, true),
             Field::new("b", DataType::Float32, true),
@@ -1313,7 +1317,12 @@ mod tests {
             DataType::Float64,
         ))];
 
-        let blocking_exec = Arc::new(BlockingExec::new(Arc::clone(&schema), 1));
+        let session_id = "sess_123";
+        let blocking_exec = Arc::new(BlockingExec::new(
+            Arc::clone(&schema),
+            1,
+            session_id.to_owned(),
+        ));
         let refs = blocking_exec.refs();
         let hash_aggregate_exec = Arc::new(HashAggregateExec::try_new(
             AggregateMode::Partial,
@@ -1323,7 +1332,7 @@ mod tests {
             schema,
         )?);
 
-        let fut = crate::physical_plan::collect(hash_aggregate_exec, runtime);
+        let fut = crate::physical_plan::collect(hash_aggregate_exec);
         let mut fut = fut.boxed();
 
         assert_is_pending(&mut fut);
