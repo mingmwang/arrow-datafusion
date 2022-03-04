@@ -31,7 +31,6 @@ use arrow::record_batch::RecordBatch;
 use super::expressions::PhysicalSortExpr;
 use super::{common, SendableRecordBatchStream, Statistics};
 
-use crate::execution::runtime_env::RuntimeEnv;
 use async_trait::async_trait;
 
 /// Execution plan for empty relation (produces no rows)
@@ -41,14 +40,17 @@ pub struct EmptyExec {
     produce_one_row: bool,
     /// The schema for the produced row
     schema: SchemaRef,
+    /// Session id
+    session_id: String,
 }
 
 impl EmptyExec {
     /// Create a new EmptyExec
-    pub fn new(produce_one_row: bool, schema: SchemaRef) -> Self {
+    pub fn new(produce_one_row: bool, schema: SchemaRef, session_id: String) -> Self {
         EmptyExec {
             produce_one_row,
             schema,
+            session_id,
         }
     }
 
@@ -108,18 +110,18 @@ impl ExecutionPlan for EmptyExec {
         children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         match children.len() {
-            0 => Ok(Arc::new(EmptyExec::new(false, self.schema.clone()))),
+            0 => Ok(Arc::new(EmptyExec::new(
+                false,
+                self.schema.clone(),
+                self.session_id(),
+            ))),
             _ => Err(DataFusionError::Internal(
                 "EmptyExec wrong number of children".to_string(),
             )),
         }
     }
 
-    async fn execute(
-        &self,
-        partition: usize,
-        _runtime: Arc<RuntimeEnv>,
-    ) -> Result<SendableRecordBatchStream> {
+    async fn execute(&self, partition: usize) -> Result<SendableRecordBatchStream> {
         // GlobalLimitExec has a single output partition
         if 0 != partition {
             return Err(DataFusionError::Internal(format!(
@@ -153,6 +155,10 @@ impl ExecutionPlan for EmptyExec {
             .expect("Create empty RecordBatch should not fail");
         common::compute_record_batch_statistics(&[batch], &self.schema, None)
     }
+
+    fn session_id(&self) -> String {
+        self.session_id.clone()
+    }
 }
 
 #[cfg(test)]
@@ -162,14 +168,13 @@ mod tests {
 
     #[tokio::test]
     async fn empty() -> Result<()> {
-        let runtime = Arc::new(RuntimeEnv::default());
         let schema = test_util::aggr_test_schema();
 
-        let empty = EmptyExec::new(false, schema.clone());
+        let empty = EmptyExec::new(false, schema.clone(), "sess_123".to_owned());
         assert_eq!(empty.schema(), schema);
 
         // we should have no results
-        let iter = empty.execute(0, runtime).await?;
+        let iter = empty.execute(0).await?;
         let batches = common::collect(iter).await?;
         assert!(batches.is_empty());
 
@@ -179,7 +184,7 @@ mod tests {
     #[test]
     fn with_new_children() -> Result<()> {
         let schema = test_util::aggr_test_schema();
-        let empty = EmptyExec::new(false, schema);
+        let empty = EmptyExec::new(false, schema, "sess_123".to_owned());
 
         let empty2 = empty.with_new_children(vec![])?;
         assert_eq!(empty.schema(), empty2.schema());
@@ -194,23 +199,21 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_execute() -> Result<()> {
-        let runtime = Arc::new(RuntimeEnv::default());
         let schema = test_util::aggr_test_schema();
-        let empty = EmptyExec::new(false, schema);
+        let empty = EmptyExec::new(false, schema, "sess_123".to_owned());
 
         // ask for the wrong partition
-        assert!(empty.execute(1, runtime.clone()).await.is_err());
-        assert!(empty.execute(20, runtime.clone()).await.is_err());
+        assert!(empty.execute(1).await.is_err());
+        assert!(empty.execute(20).await.is_err());
         Ok(())
     }
 
     #[tokio::test]
     async fn produce_one_row() -> Result<()> {
-        let runtime = Arc::new(RuntimeEnv::default());
         let schema = test_util::aggr_test_schema();
-        let empty = EmptyExec::new(true, schema);
+        let empty = EmptyExec::new(true, schema, "sess_123".to_owned());
 
-        let iter = empty.execute(0, runtime).await?;
+        let iter = empty.execute(0).await?;
         let batches = common::collect(iter).await?;
 
         // should have one item

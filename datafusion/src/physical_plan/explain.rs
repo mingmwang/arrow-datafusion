@@ -31,7 +31,6 @@ use crate::{
 use arrow::{array::StringBuilder, datatypes::SchemaRef, record_batch::RecordBatch};
 
 use super::{expressions::PhysicalSortExpr, SendableRecordBatchStream};
-use crate::execution::runtime_env::RuntimeEnv;
 use crate::physical_plan::metrics::{ExecutionPlanMetricsSet, MemTrackingMetrics};
 use async_trait::async_trait;
 
@@ -46,6 +45,8 @@ pub struct ExplainExec {
     stringified_plans: Vec<StringifiedPlan>,
     /// control which plans to print
     verbose: bool,
+    /// Session id
+    session_id: String,
 }
 
 impl ExplainExec {
@@ -54,11 +55,13 @@ impl ExplainExec {
         schema: SchemaRef,
         stringified_plans: Vec<StringifiedPlan>,
         verbose: bool,
+        session_id: String,
     ) -> Self {
         ExplainExec {
             schema,
             stringified_plans,
             verbose,
+            session_id,
         }
     }
 
@@ -114,7 +117,6 @@ impl ExecutionPlan for ExplainExec {
     async fn execute(
         &self,
         partition: usize,
-        _runtime: Arc<RuntimeEnv>,
     ) -> Result<SendableRecordBatchStream> {
         if 0 != partition {
             return Err(DataFusionError::Internal(format!(
@@ -180,6 +182,10 @@ impl ExecutionPlan for ExplainExec {
     fn statistics(&self) -> Statistics {
         // Statistics an EXPLAIN plan are not relevant
         Statistics::default()
+    }
+
+    fn session_id(&self) -> String {
+        self.session_id.clone()
     }
 }
 

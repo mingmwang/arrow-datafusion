@@ -37,7 +37,6 @@ use arrow::record_batch::RecordBatch;
 use super::expressions::{Column, PhysicalSortExpr};
 use super::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use super::{RecordBatchStream, SendableRecordBatchStream, Statistics};
-use crate::execution::runtime_env::RuntimeEnv;
 use async_trait::async_trait;
 use futures::stream::Stream;
 use futures::stream::StreamExt;
@@ -153,12 +152,11 @@ impl ExecutionPlan for ProjectionExec {
     async fn execute(
         &self,
         partition: usize,
-        runtime: Arc<RuntimeEnv>,
     ) -> Result<SendableRecordBatchStream> {
         Ok(Box::pin(ProjectionStream {
             schema: self.schema.clone(),
             expr: self.expr.iter().map(|x| x.0.clone()).collect(),
-            input: self.input.execute(partition, runtime).await?,
+            input: self.input.execute(partition).await?,
             baseline_metrics: BaselineMetrics::new(&self.metrics, partition),
         }))
     }
@@ -197,6 +195,10 @@ impl ExecutionPlan for ProjectionExec {
             self.input.statistics(),
             self.expr.iter().map(|(e, _)| Arc::clone(e)),
         )
+    }
+
+    fn session_id(&self) -> String {
+        self.input.session_id()
     }
 }
 
@@ -310,13 +312,12 @@ mod tests {
 
     #[tokio::test]
     async fn project_first_column() -> Result<()> {
-        let runtime = Arc::new(RuntimeEnv::default());
         let schema = test_util::aggr_test_schema();
 
         let partitions = 4;
         let (_, files) =
             test::create_partitioned_csv("aggregate_test_100.csv", partitions)?;
-
+        let session_id = "sess_123";
         let csv = CsvExec::new(
             FileScanConfig {
                 object_store: Arc::new(LocalFileSystem {}),
@@ -329,6 +330,7 @@ mod tests {
             },
             true,
             b',',
+            session_id.to_owned(),
         );
 
         // pick column c1 and name it column c1 in the output schema
@@ -346,7 +348,7 @@ mod tests {
         let mut row_count = 0;
         for partition in 0..projection.output_partitioning().partition_count() {
             partition_count += 1;
-            let stream = projection.execute(partition, runtime.clone()).await?;
+            let stream = projection.execute(partition).await?;
 
             row_count += stream
                 .map(|batch| {

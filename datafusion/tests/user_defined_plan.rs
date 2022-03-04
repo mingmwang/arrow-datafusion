@@ -69,7 +69,6 @@ use arrow::{
 };
 use datafusion::{
     error::{DataFusionError, Result},
-    execution::context::ExecutionContextState,
     execution::context::QueryPlanner,
     logical_plan::{Expr, LogicalPlan, UserDefinedLogicalNode},
     optimizer::{optimizer::OptimizerRule, utils::optimize_children},
@@ -79,21 +78,21 @@ use datafusion::{
         DisplayFormatType, Distribution, ExecutionPlan, Partitioning, PhysicalPlanner,
         RecordBatchStream, SendableRecordBatchStream, Statistics,
     },
-    prelude::{ExecutionConfig, ExecutionContext},
+    prelude::{SessionConfig, SessionContext},
 };
 use fmt::Debug;
 use std::task::{Context, Poll};
 use std::{any::Any, collections::BTreeMap, fmt, sync::Arc};
 
 use async_trait::async_trait;
-use datafusion::execution::context::ExecutionProps;
+use datafusion::execution::context::{ExecutionProps, SessionState};
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::logical_plan::plan::{Extension, Sort};
 use datafusion::logical_plan::{DFSchemaRef, Limit};
 
 /// Execute the specified sql and return the resulting record batches
 /// pretty printed as a String.
-async fn exec_sql(ctx: &mut ExecutionContext, sql: &str) -> Result<String> {
+async fn exec_sql(ctx: &SessionContext, sql: &str) -> Result<String> {
     let df = ctx.sql(sql).await?;
     let batches = df.collect().await?;
     pretty_format_batches(&batches)
@@ -102,12 +101,12 @@ async fn exec_sql(ctx: &mut ExecutionContext, sql: &str) -> Result<String> {
 }
 
 /// Create a test table.
-async fn setup_table(mut ctx: ExecutionContext) -> Result<ExecutionContext> {
+async fn setup_table(ctx: SessionContext) -> Result<SessionContext> {
     let sql = "CREATE EXTERNAL TABLE sales(customer_id VARCHAR, revenue BIGINT) STORED AS CSV location 'tests/customer.csv'";
 
     let expected = vec!["++", "++"];
 
-    let s = exec_sql(&mut ctx, sql).await?;
+    let s = exec_sql(&ctx, sql).await?;
     let actual = s.lines().collect::<Vec<_>>();
 
     assert_eq!(expected, actual, "Creating table");
@@ -115,13 +114,13 @@ async fn setup_table(mut ctx: ExecutionContext) -> Result<ExecutionContext> {
 }
 
 async fn setup_table_without_schemas(
-    mut ctx: ExecutionContext,
-) -> Result<ExecutionContext> {
+    ctx: SessionContext,
+) -> Result<SessionContext> {
     let sql = "CREATE EXTERNAL TABLE sales STORED AS CSV location 'tests/customer.csv'";
 
     let expected = vec!["++", "++"];
 
-    let s = exec_sql(&mut ctx, sql).await?;
+    let s = exec_sql(&ctx, sql).await?;
     let actual = s.lines().collect::<Vec<_>>();
 
     assert_eq!(expected, actual, "Creating table");
@@ -136,7 +135,7 @@ const QUERY: &str =
 // Run the query using the specified execution context and compare it
 // to the known result
 async fn run_and_compare_query(
-    mut ctx: ExecutionContext,
+    ctx: &SessionContext,
     description: &str,
 ) -> Result<()> {
     let expected = vec![
@@ -149,7 +148,7 @@ async fn run_and_compare_query(
         "+-------------+---------+",
     ];
 
-    let s = exec_sql(&mut ctx, QUERY).await?;
+    let s = exec_sql(ctx, QUERY).await?;
     let actual = s.lines().collect::<Vec<_>>();
 
     assert_eq!(
@@ -166,7 +165,7 @@ async fn run_and_compare_query(
 // Run the query using the specified execution context and compare it
 // to the known result
 async fn run_and_compare_query_with_auto_schemas(
-    mut ctx: ExecutionContext,
+    ctx: &SessionContext,
     description: &str,
 ) -> Result<()> {
     let expected = vec![
@@ -179,7 +178,7 @@ async fn run_and_compare_query_with_auto_schemas(
         "+----------+----------+",
     ];
 
-    let s = exec_sql(&mut ctx, QUERY1).await?;
+    let s = exec_sql(ctx, QUERY1).await?;
     let actual = s.lines().collect::<Vec<_>>();
 
     assert_eq!(
@@ -196,15 +195,15 @@ async fn run_and_compare_query_with_auto_schemas(
 #[tokio::test]
 // Run the query using default planners and optimizer
 async fn normal_query_without_schemas() -> Result<()> {
-    let ctx = setup_table_without_schemas(ExecutionContext::new()).await?;
-    run_and_compare_query_with_auto_schemas(ctx, "Default context").await
+    let ctx = setup_table_without_schemas(SessionContext::new()).await?;
+    run_and_compare_query_with_auto_schemas(&ctx, "Default context").await
 }
 
 #[tokio::test]
 // Run the query using default planners and optimizer
 async fn normal_query() -> Result<()> {
-    let ctx = setup_table(ExecutionContext::new()).await?;
-    run_and_compare_query(ctx, "Default context").await
+    let ctx = setup_table(SessionContext::new()).await?;
+    run_and_compare_query(&ctx, "Default context").await
 }
 
 #[tokio::test]
@@ -212,13 +211,13 @@ async fn normal_query() -> Result<()> {
 async fn topk_query() -> Result<()> {
     // Note the only difference is that the top
     let ctx = setup_table(make_topk_context()).await?;
-    run_and_compare_query(ctx, "Topk context").await
+    run_and_compare_query(&ctx, "Topk context").await
 }
 
 #[tokio::test]
 // Run EXPLAIN PLAN and show the plan was in fact rewritten
 async fn topk_plan() -> Result<()> {
-    let mut ctx = setup_table(make_topk_context()).await?;
+    let ctx = setup_table(make_topk_context()).await?;
 
     let expected = vec![
         "| logical_plan after topk                               | TopK: k=3                                                                     |",
@@ -227,7 +226,7 @@ async fn topk_plan() -> Result<()> {
     ].join("\n");
 
     let explain_query = format!("EXPLAIN VERBOSE {}", QUERY);
-    let actual_output = exec_sql(&mut ctx, &explain_query).await?;
+    let actual_output = exec_sql(&ctx, &explain_query).await?;
 
     // normalize newlines (output on windows uses \r\n)
     let actual_output = actual_output.replace("\r\n", "\n");
@@ -247,13 +246,13 @@ async fn topk_plan() -> Result<()> {
     Ok(())
 }
 
-fn make_topk_context() -> ExecutionContext {
-    let config = ExecutionConfig::new()
+fn make_topk_context() -> SessionContext {
+    let config = SessionConfig::new().with_target_partitions(48);
+    let state = SessionState::with_config(config)
         .with_query_planner(Arc::new(TopKQueryPlanner {}))
-        .with_target_partitions(48)
         .add_optimizer_rule(Arc::new(TopKOptimizerRule {}));
-
-    ExecutionContext::with_config(config)
+    let ctx = SessionContext::with_state(state, RuntimeEnv::global());
+    ctx
 }
 
 // ------ The implementation of the TopK code follows -----
@@ -267,7 +266,7 @@ impl QueryPlanner for TopKQueryPlanner {
     async fn create_physical_plan(
         &self,
         logical_plan: &LogicalPlan,
-        ctx_state: &ExecutionContextState,
+        session_state: &SessionState,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         // Teach the default physical planner how to plan TopK nodes.
         let physical_planner =
@@ -276,7 +275,7 @@ impl QueryPlanner for TopKQueryPlanner {
             )]);
         // Delegate most work of physical planning to the default physical planner
         physical_planner
-            .create_physical_plan(logical_plan, ctx_state)
+            .create_physical_plan(logical_plan, session_state)
             .await
     }
 }
@@ -386,7 +385,7 @@ impl ExtensionPlanner for TopKPlanner {
         node: &dyn UserDefinedLogicalNode,
         logical_inputs: &[&LogicalPlan],
         physical_inputs: &[Arc<dyn ExecutionPlan>],
-        _ctx_state: &ExecutionContextState,
+        session_state: &SessionState,
     ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
         Ok(
             if let Some(topk_node) = node.as_any().downcast_ref::<TopKPlanNode>() {
@@ -396,6 +395,7 @@ impl ExtensionPlanner for TopKPlanner {
                 Some(Arc::new(TopKExec {
                     input: physical_inputs[0].clone(),
                     k: topk_node.k,
+                    session_id: session_state.session_id.clone(),
                 }))
             } else {
                 None
@@ -410,6 +410,8 @@ struct TopKExec {
     input: Arc<dyn ExecutionPlan>,
     /// The maxium number of values
     k: usize,
+    /// Session id
+    session_id: String,
 }
 
 impl Debug for TopKExec {
@@ -457,6 +459,7 @@ impl ExecutionPlan for TopKExec {
             1 => Ok(Arc::new(TopKExec {
                 input: children[0].clone(),
                 k: self.k,
+                session_id: self.session_id(),
             })),
             _ => Err(DataFusionError::Internal(
                 "TopKExec wrong number of children".to_string(),
@@ -468,7 +471,6 @@ impl ExecutionPlan for TopKExec {
     async fn execute(
         &self,
         partition: usize,
-        runtime: Arc<RuntimeEnv>,
     ) -> Result<SendableRecordBatchStream> {
         if 0 != partition {
             return Err(DataFusionError::Internal(format!(
@@ -478,7 +480,7 @@ impl ExecutionPlan for TopKExec {
         }
 
         Ok(Box::pin(TopKReader {
-            input: self.input.execute(partition, runtime).await?,
+            input: self.input.execute(partition).await?,
             k: self.k,
             done: false,
             state: BTreeMap::new(),
@@ -501,6 +503,10 @@ impl ExecutionPlan for TopKExec {
         // to improve the optimizability of this plan
         // better statistics inference could be provided
         Statistics::default()
+    }
+
+    fn session_id(&self) -> String {
+        self.session_id.clone()
     }
 }
 

@@ -19,26 +19,27 @@
 
 use datafusion::dataframe::DataFrame;
 use datafusion::error::{DataFusionError, Result};
-use datafusion::execution::context::{ExecutionConfig, ExecutionContext};
+use datafusion::execution::context::{SessionConfig, SessionContext};
 use std::sync::Arc;
+use datafusion::execution::runtime_env::RuntimeEnv;
 
 /// The CLI supports using a local DataFusion context or a distributed BallistaContext
 pub enum Context {
     /// In-process execution with DataFusion
-    Local(ExecutionContext),
+    Local(SessionContext),
     /// Distributed execution with Ballista (if available)
     Remote(BallistaContext),
 }
 
 impl Context {
     /// create a new remote context with given host and port
-    pub fn new_remote(host: &str, port: u16) -> Result<Context> {
+    pub async fn new_remote(host: &str, port: u16) -> Result<Context> {
         Ok(Context::Remote(BallistaContext::try_new(host, port)?))
     }
 
     /// create a local context using the given config
-    pub fn new_local(config: &ExecutionConfig) -> Context {
-        Context::Local(ExecutionContext::with_config(config.clone()))
+    pub fn new_local(config: &SessionConfig) -> Context {
+        Context::Local(SessionContext::with_config(config.clone(), RuntimeEnv::global()))
     }
 
     /// execute an SQL statement against the context
@@ -56,13 +57,14 @@ impl Context {
 pub struct BallistaContext(ballista::context::BallistaContext);
 #[cfg(feature = "ballista")]
 impl BallistaContext {
-    pub fn try_new(host: &str, port: u16) -> Result<Self> {
+    pub async fn try_new(host: &str, port: u16) -> Result<Self> {
         use ballista::context::BallistaContext;
         use ballista::prelude::BallistaConfig;
         let config: BallistaConfig = BallistaConfig::new()
             .map_err(|e| DataFusionError::Execution(format!("{:?}", e)))?;
-        Ok(Self(BallistaContext::remote(host, port, &config)))
+        BallistaContext::remote(host, port, &config).await
     }
+
     pub async fn sql(&mut self, sql: &str) -> Result<Arc<dyn DataFrame>> {
         self.0.sql(sql).await
     }

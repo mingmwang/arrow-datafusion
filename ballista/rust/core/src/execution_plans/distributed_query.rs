@@ -42,9 +42,9 @@ use datafusion::physical_plan::{
     SendableRecordBatchStream, Statistics,
 };
 
+use crate::serde::protobuf::execute_query_params::OptionalSessionId;
 use crate::serde::{AsLogicalPlan, DefaultLogicalExtensionCodec, LogicalExtensionCodec};
 use async_trait::async_trait;
-use datafusion::execution::runtime_env::RuntimeEnv;
 use futures::future;
 use futures::StreamExt;
 use log::{error, info};
@@ -65,16 +65,24 @@ pub struct DistributedQueryExec<T: 'static + AsLogicalPlan> {
     extension_codec: Arc<dyn LogicalExtensionCodec>,
     /// Phantom data for serializable plan message
     plan_repr: PhantomData<T>,
+    /// Session id
+    session_id: String,
 }
 
 impl<T: 'static + AsLogicalPlan> DistributedQueryExec<T> {
-    pub fn new(scheduler_url: String, config: BallistaConfig, plan: LogicalPlan) -> Self {
+    pub fn new(
+        scheduler_url: String,
+        config: BallistaConfig,
+        plan: LogicalPlan,
+        session_id: String,
+    ) -> Self {
         Self {
             scheduler_url,
             config,
             plan,
             extension_codec: Arc::new(DefaultLogicalExtensionCodec {}),
             plan_repr: PhantomData,
+            session_id,
         }
     }
 
@@ -83,6 +91,7 @@ impl<T: 'static + AsLogicalPlan> DistributedQueryExec<T> {
         config: BallistaConfig,
         plan: LogicalPlan,
         extension_codec: Arc<dyn LogicalExtensionCodec>,
+        session_id: String,
     ) -> Self {
         Self {
             scheduler_url,
@@ -90,6 +99,7 @@ impl<T: 'static + AsLogicalPlan> DistributedQueryExec<T> {
             plan,
             extension_codec,
             plan_repr: PhantomData,
+            session_id,
         }
     }
 
@@ -99,6 +109,7 @@ impl<T: 'static + AsLogicalPlan> DistributedQueryExec<T> {
         plan: LogicalPlan,
         extension_codec: Arc<dyn LogicalExtensionCodec>,
         plan_repr: PhantomData<T>,
+        session_id: String,
     ) -> Self {
         Self {
             scheduler_url,
@@ -106,6 +117,7 @@ impl<T: 'static + AsLogicalPlan> DistributedQueryExec<T> {
             plan,
             extension_codec,
             plan_repr,
+            session_id,
         }
     }
 }
@@ -146,18 +158,15 @@ impl<T: 'static + AsLogicalPlan> ExecutionPlan for DistributedQueryExec<T> {
             plan: self.plan.clone(),
             extension_codec: self.extension_codec.clone(),
             plan_repr: self.plan_repr,
+            session_id: self.session_id(),
         }))
     }
 
-    async fn execute(
-        &self,
-        partition: usize,
-        _runtime: Arc<RuntimeEnv>,
-    ) -> Result<SendableRecordBatchStream> {
+    async fn execute(&self, partition: usize) -> Result<SendableRecordBatchStream> {
         assert_eq!(0, partition);
 
         info!("Connecting to Ballista scheduler at {}", self.scheduler_url);
-
+        // TODO reuse the scheduler to avoid connecting to the Ballista scheduler again and again
         let mut scheduler = SchedulerGrpcClient::connect(self.scheduler_url.clone())
             .await
             .map_err(|e| DataFusionError::Execution(format!("{:?}", e)))?;
@@ -190,6 +199,9 @@ impl<T: 'static + AsLogicalPlan> ExecutionPlan for DistributedQueryExec<T> {
                         value: v.to_owned(),
                     })
                     .collect::<Vec<_>>(),
+                optional_session_id: Some(OptionalSessionId::SessionId(
+                    self.session_id(),
+                )),
             })
             .await
             .map_err(|e| DataFusionError::Execution(format!("{:?}", e)))?
@@ -273,6 +285,10 @@ impl<T: 'static + AsLogicalPlan> ExecutionPlan for DistributedQueryExec<T> {
         // performing the node by node conversion to a full physical plan.
         // This implies that we cannot infer the statistics at this stage.
         Statistics::default()
+    }
+
+    fn session_id(&self) -> String {
+        self.session_id.clone()
     }
 }
 

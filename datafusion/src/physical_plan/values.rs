@@ -20,7 +20,6 @@
 use super::expressions::PhysicalSortExpr;
 use super::{common, SendableRecordBatchStream, Statistics};
 use crate::error::{DataFusionError, Result};
-use crate::execution::runtime_env::RuntimeEnv;
 use crate::physical_plan::{
     memory::MemoryStream, ColumnarValue, DisplayFormatType, Distribution, ExecutionPlan,
     Partitioning, PhysicalExpr,
@@ -40,6 +39,8 @@ pub struct ValuesExec {
     schema: SchemaRef,
     /// The data
     data: Vec<RecordBatch>,
+    /// Session id
+    session_id: String
 }
 
 impl ValuesExec {
@@ -47,6 +48,7 @@ impl ValuesExec {
     pub fn try_new(
         schema: SchemaRef,
         data: Vec<Vec<Arc<dyn PhysicalExpr>>>,
+        session_id: String,
     ) -> Result<Self> {
         if data.is_empty() {
             return Err(DataFusionError::Plan("Values list cannot be empty".into()));
@@ -87,7 +89,7 @@ impl ValuesExec {
             .collect::<Result<Vec<_>>>()?;
         let batch = RecordBatch::try_new(schema.clone(), arr)?;
         let data: Vec<RecordBatch> = vec![batch];
-        Ok(Self { schema, data })
+        Ok(Self { schema, data, session_id })
     }
 
     /// provides the data
@@ -136,6 +138,7 @@ impl ExecutionPlan for ValuesExec {
             0 => Ok(Arc::new(ValuesExec {
                 schema: self.schema.clone(),
                 data: self.data.clone(),
+                session_id: self.session_id(),
             })),
             _ => Err(DataFusionError::Internal(
                 "ValuesExec wrong number of children".to_string(),
@@ -146,7 +149,6 @@ impl ExecutionPlan for ValuesExec {
     async fn execute(
         &self,
         partition: usize,
-        _runtime: Arc<RuntimeEnv>,
     ) -> Result<SendableRecordBatchStream> {
         // GlobalLimitExec has a single output partition
         if 0 != partition {
@@ -179,6 +181,10 @@ impl ExecutionPlan for ValuesExec {
         let batch = self.data();
         common::compute_record_batch_statistics(&[batch], &self.schema, None)
     }
+
+    fn session_id(&self) -> String {
+        self.session_id.clone()
+    }
 }
 
 #[cfg(test)]
@@ -189,7 +195,7 @@ mod tests {
     #[tokio::test]
     async fn values_empty_case() -> Result<()> {
         let schema = test_util::aggr_test_schema();
-        let empty = ValuesExec::try_new(schema, vec![]);
+        let empty = ValuesExec::try_new(schema, vec![], "sess_123".to_owned());
         assert!(!empty.is_ok());
         Ok(())
     }

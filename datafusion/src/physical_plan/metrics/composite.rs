@@ -17,7 +17,6 @@
 
 //! Metrics common for complex operators with multiple steps.
 
-use crate::execution::runtime_env::RuntimeEnv;
 use crate::physical_plan::metrics::tracker::MemTrackingMetrics;
 use crate::physical_plan::metrics::{
     BaselineMetrics, Count, ExecutionPlanMetricsSet, MetricValue, MetricsSet, Time,
@@ -27,6 +26,7 @@ use crate::physical_plan::Metric;
 use chrono::{TimeZone, Utc};
 use std::sync::Arc;
 use std::time::Duration;
+use crate::execution::runtime_env::RuntimeEnv;
 
 #[derive(Debug, Clone)]
 /// Collects all metrics during a complex operation, which is composed of multiple steps and

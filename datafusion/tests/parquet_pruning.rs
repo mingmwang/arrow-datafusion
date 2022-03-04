@@ -37,11 +37,12 @@ use datafusion::{
         accept, file_format::ParquetExec, metrics::MetricsSet, ExecutionPlan,
         ExecutionPlanVisitor,
     },
-    prelude::{ExecutionConfig, ExecutionContext},
+    prelude::{SessionConfig, SessionContext},
     scalar::ScalarValue,
 };
 use parquet::{arrow::ArrowWriter, file::properties::WriterProperties};
 use tempfile::NamedTempFile;
+use datafusion::execution::runtime_env::RuntimeEnv;
 
 #[tokio::test]
 async fn prune_timestamps_nanos() {
@@ -161,7 +162,7 @@ async fn prune_disabled() {
     );
 
     // same query, without pruning
-    let config = ExecutionConfig::new().with_parquet_pruning(false);
+    let config = SessionConfig::new().with_parquet_pruning(false);
 
     let output = ContextWithParquet::with_config(Scenario::Timestamps, config)
         .await
@@ -424,7 +425,7 @@ struct ContextWithParquet {
     /// when dropped
     file: NamedTempFile,
     provider: Arc<dyn TableProvider>,
-    ctx: ExecutionContext,
+    ctx: SessionContext,
 }
 
 /// The output of running one of the test cases
@@ -472,15 +473,15 @@ impl TestOutput {
 /// and the appropriate scenario
 impl ContextWithParquet {
     async fn new(scenario: Scenario) -> Self {
-        Self::with_config(scenario, ExecutionConfig::new()).await
+        Self::with_config(scenario, SessionConfig::new()).await
     }
 
-    async fn with_config(scenario: Scenario, config: ExecutionConfig) -> Self {
+    async fn with_config(scenario: Scenario, config: SessionConfig) -> Self {
         let file = make_test_file(scenario).await;
         let parquet_path = file.path().to_string_lossy();
 
         // now, setup a the file as a data source and run a query against it
-        let mut ctx = ExecutionContext::with_config(config);
+        let ctx = SessionContext::with_config(config, RuntimeEnv::global());
 
         ctx.register_parquet("t", &parquet_path).await.unwrap();
         let provider = ctx.deregister_table("t").unwrap().unwrap();
@@ -537,8 +538,7 @@ impl ContextWithParquet {
             .await
             .expect("creating physical plan");
 
-        let runtime = self.ctx.state.lock().runtime_env.clone();
-        let results = datafusion::physical_plan::collect(physical_plan.clone(), runtime)
+        let results = datafusion::physical_plan::collect(physical_plan.clone())
             .await
             .expect("Running");
 

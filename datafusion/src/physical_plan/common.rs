@@ -19,7 +19,6 @@
 
 use super::{RecordBatchStream, SendableRecordBatchStream};
 use crate::error::{DataFusionError, Result};
-use crate::execution::runtime_env::RuntimeEnv;
 use crate::physical_plan::metrics::MemTrackingMetrics;
 use crate::physical_plan::{ColumnStatistics, ExecutionPlan, Statistics};
 use arrow::compute::concat;
@@ -175,11 +174,10 @@ fn build_file_list_recurse(
 pub(crate) fn spawn_execution(
     input: Arc<dyn ExecutionPlan>,
     mut output: mpsc::Sender<ArrowResult<RecordBatch>>,
-    partition: usize,
-    runtime: Arc<RuntimeEnv>,
+    partition: usize
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut stream = match input.execute(partition, runtime).await {
+        let mut stream = match input.execute(partition).await {
             Err(e) => {
                 // If send fails, plan being torn
                 // down, no place to send the error

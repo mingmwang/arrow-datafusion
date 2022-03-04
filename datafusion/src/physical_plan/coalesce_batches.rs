@@ -29,7 +29,6 @@ use crate::physical_plan::{
     SendableRecordBatchStream,
 };
 
-use crate::execution::runtime_env::RuntimeEnv;
 use arrow::compute::kernels::concat::concat;
 use arrow::datatypes::SchemaRef;
 use arrow::error::Result as ArrowResult;
@@ -124,10 +123,9 @@ impl ExecutionPlan for CoalesceBatchesExec {
     async fn execute(
         &self,
         partition: usize,
-        runtime: Arc<RuntimeEnv>,
     ) -> Result<SendableRecordBatchStream> {
         Ok(Box::pin(CoalesceBatchesStream {
-            input: self.input.execute(partition, runtime).await?,
+            input: self.input.execute(partition).await?,
             schema: self.input.schema(),
             target_batch_size: self.target_batch_size,
             buffer: Vec::new(),
@@ -159,6 +157,10 @@ impl ExecutionPlan for CoalesceBatchesExec {
 
     fn statistics(&self) -> Statistics {
         self.input.statistics()
+    }
+
+    fn session_id(&self) -> String {
+        self.input.session_id()
     }
 }
 
@@ -339,7 +341,7 @@ mod tests {
         target_batch_size: usize,
     ) -> Result<Vec<Vec<RecordBatch>>> {
         // create physical plan
-        let exec = MemoryExec::try_new(&input_partitions, schema.clone(), None)?;
+        let exec = MemoryExec::try_new(&input_partitions, schema.clone(), None, "sess_123".to_owned())?;
         let exec =
             RepartitionExec::try_new(Arc::new(exec), Partitioning::RoundRobinBatch(1))?;
         let exec: Arc<dyn ExecutionPlan> =
@@ -348,10 +350,9 @@ mod tests {
         // execute and collect results
         let output_partition_count = exec.output_partitioning().partition_count();
         let mut output_partitions = Vec::with_capacity(output_partition_count);
-        let runtime = Arc::new(RuntimeEnv::default());
         for i in 0..output_partition_count {
             // execute this *output* partition and collect all batches
-            let mut stream = exec.execute(i, runtime.clone()).await?;
+            let mut stream = exec.execute(i).await?;
             let mut batches = vec![];
             while let Some(result) = stream.next().await {
                 batches.push(result?);

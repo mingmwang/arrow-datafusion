@@ -21,12 +21,12 @@ use tempfile::TempDir;
 
 #[tokio::test]
 async fn all_where_empty() -> Result<()> {
-    let mut ctx = ExecutionContext::new();
-    register_aggregate_csv(&mut ctx).await?;
+    let ctx = SessionContext::new();
+    register_aggregate_csv(&ctx).await?;
     let sql = "SELECT *
                FROM aggregate_test_100
                WHERE 1=2";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec!["++", "++"];
     assert_batches_eq!(expected, &actual);
     Ok(())
@@ -34,10 +34,10 @@ async fn all_where_empty() -> Result<()> {
 
 #[tokio::test]
 async fn select_values_list() -> Result<()> {
-    let mut ctx = ExecutionContext::new();
+    let ctx = SessionContext::new();
     {
         let sql = "VALUES (1)";
-        let actual = execute_to_batches(&mut ctx, sql).await;
+        let actual = execute_to_batches(&ctx, sql).await;
         let expected = vec![
             "+---------+",
             "| column1 |",
@@ -49,7 +49,7 @@ async fn select_values_list() -> Result<()> {
     }
     {
         let sql = "VALUES (-1)";
-        let actual = execute_to_batches(&mut ctx, sql).await;
+        let actual = execute_to_batches(&ctx, sql).await;
         let expected = vec![
             "+---------+",
             "| column1 |",
@@ -61,7 +61,7 @@ async fn select_values_list() -> Result<()> {
     }
     {
         let sql = "VALUES (2+1,2-1,2>1)";
-        let actual = execute_to_batches(&mut ctx, sql).await;
+        let actual = execute_to_batches(&ctx, sql).await;
         let expected = vec![
             "+---------+---------+---------+",
             "| column1 | column2 | column3 |",
@@ -83,7 +83,7 @@ async fn select_values_list() -> Result<()> {
     }
     {
         let sql = "VALUES (1),(2)";
-        let actual = execute_to_batches(&mut ctx, sql).await;
+        let actual = execute_to_batches(&ctx, sql).await;
         let expected = vec![
             "+---------+",
             "| column1 |",
@@ -101,7 +101,7 @@ async fn select_values_list() -> Result<()> {
     }
     {
         let sql = "VALUES (1,'a'),(2,'b')";
-        let actual = execute_to_batches(&mut ctx, sql).await;
+        let actual = execute_to_batches(&ctx, sql).await;
         let expected = vec![
             "+---------+---------+",
             "| column1 | column2 |",
@@ -134,7 +134,7 @@ async fn select_values_list() -> Result<()> {
     }
     {
         let sql = "VALUES (1,'a'),(NULL,'b'),(3,'c')";
-        let actual = execute_to_batches(&mut ctx, sql).await;
+        let actual = execute_to_batches(&ctx, sql).await;
         let expected = vec![
             "+---------+---------+",
             "| column1 | column2 |",
@@ -148,7 +148,7 @@ async fn select_values_list() -> Result<()> {
     }
     {
         let sql = "VALUES (NULL,'a'),(NULL,'b'),(3,'c')";
-        let actual = execute_to_batches(&mut ctx, sql).await;
+        let actual = execute_to_batches(&ctx, sql).await;
         let expected = vec![
             "+---------+---------+",
             "| column1 | column2 |",
@@ -162,7 +162,7 @@ async fn select_values_list() -> Result<()> {
     }
     {
         let sql = "VALUES (NULL,'a'),(NULL,'b'),(NULL,'c')";
-        let actual = execute_to_batches(&mut ctx, sql).await;
+        let actual = execute_to_batches(&ctx, sql).await;
         let expected = vec![
             "+---------+---------+",
             "| column1 | column2 |",
@@ -176,7 +176,7 @@ async fn select_values_list() -> Result<()> {
     }
     {
         let sql = "VALUES (1,'a'),(2,NULL),(3,'c')";
-        let actual = execute_to_batches(&mut ctx, sql).await;
+        let actual = execute_to_batches(&ctx, sql).await;
         let expected = vec![
             "+---------+---------+",
             "| column1 | column2 |",
@@ -190,7 +190,7 @@ async fn select_values_list() -> Result<()> {
     }
     {
         let sql = "VALUES (1,NULL),(2,NULL),(3,'c')";
-        let actual = execute_to_batches(&mut ctx, sql).await;
+        let actual = execute_to_batches(&ctx, sql).await;
         let expected = vec![
             "+---------+---------+",
             "| column1 | column2 |",
@@ -204,7 +204,7 @@ async fn select_values_list() -> Result<()> {
     }
     {
         let sql = "VALUES (1,2,3,4,5,6,7,8,9,10,11,12,13,NULL,'F',3.5)";
-        let actual = execute_to_batches(&mut ctx, sql).await;
+        let actual = execute_to_batches(&ctx, sql).await;
         let expected = vec![
             "+---------+---------+---------+---------+---------+---------+---------+---------+---------+----------+----------+----------+----------+----------+----------+----------+",
             "| column1 | column2 | column3 | column4 | column5 | column6 | column7 | column8 | column9 | column10 | column11 | column12 | column13 | column14 | column15 | column16 |",
@@ -216,7 +216,7 @@ async fn select_values_list() -> Result<()> {
     }
     {
         let sql = "SELECT * FROM (VALUES (1,'a'),(2,NULL)) AS t(c1, c2)";
-        let actual = execute_to_batches(&mut ctx, sql).await;
+        let actual = execute_to_batches(&ctx, sql).await;
         let expected = vec![
             "+----+----+",
             "| c1 | c2 |",
@@ -229,7 +229,7 @@ async fn select_values_list() -> Result<()> {
     }
     {
         let sql = "EXPLAIN VALUES (1, 'a', -1, 1.1),(NULL, 'b', -3, 0.5)";
-        let actual = execute_to_batches(&mut ctx, sql).await;
+        let actual = execute_to_batches(&ctx, sql).await;
         let expected = vec![
             "+---------------+-----------------------------------------------------------------------------------------------------------+",
             "| plan_type     | plan                                                                                                      |",
@@ -246,14 +246,14 @@ async fn select_values_list() -> Result<()> {
 
 #[tokio::test]
 async fn select_all() -> Result<()> {
-    let mut ctx = ExecutionContext::new();
-    register_aggregate_simple_csv(&mut ctx).await?;
+    let ctx = SessionContext::new();
+    register_aggregate_simple_csv(&ctx).await?;
 
     let sql = "SELECT c1 FROM aggregate_simple order by c1";
-    let results = execute_to_batches(&mut ctx, sql).await;
+    let results = execute_to_batches(&ctx, sql).await;
 
     let sql_all = "SELECT ALL c1 FROM aggregate_simple order by c1";
-    let results_all = execute_to_batches(&mut ctx, sql_all).await;
+    let results_all = execute_to_batches(&ctx, sql_all).await;
 
     let expected = vec![
         "+---------+",
@@ -285,11 +285,11 @@ async fn select_all() -> Result<()> {
 
 #[tokio::test]
 async fn select_distinct() -> Result<()> {
-    let mut ctx = ExecutionContext::new();
-    register_aggregate_simple_csv(&mut ctx).await?;
+    let ctx = SessionContext::new();
+    register_aggregate_simple_csv(&ctx).await?;
 
     let sql = "SELECT DISTINCT * FROM aggregate_simple";
-    let mut actual = execute(&mut ctx, sql).await;
+    let mut actual = execute(&ctx, sql).await;
     actual.sort();
 
     let mut dedup = actual.clone();
@@ -302,11 +302,11 @@ async fn select_distinct() -> Result<()> {
 
 #[tokio::test]
 async fn select_distinct_simple_1() {
-    let mut ctx = ExecutionContext::new();
-    register_aggregate_simple_csv(&mut ctx).await.unwrap();
+    let ctx = SessionContext::new();
+    register_aggregate_simple_csv(&ctx).await.unwrap();
 
     let sql = "SELECT DISTINCT c1 FROM aggregate_simple order by c1";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
 
     let expected = vec![
         "+---------+",
@@ -324,11 +324,11 @@ async fn select_distinct_simple_1() {
 
 #[tokio::test]
 async fn select_distinct_simple_2() {
-    let mut ctx = ExecutionContext::new();
-    register_aggregate_simple_csv(&mut ctx).await.unwrap();
+    let ctx = SessionContext::new();
+    register_aggregate_simple_csv(&ctx).await.unwrap();
 
     let sql = "SELECT DISTINCT c1, c2 FROM aggregate_simple order by c1";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
 
     let expected = vec![
         "+---------+----------------+",
@@ -346,11 +346,11 @@ async fn select_distinct_simple_2() {
 
 #[tokio::test]
 async fn select_distinct_simple_3() {
-    let mut ctx = ExecutionContext::new();
-    register_aggregate_simple_csv(&mut ctx).await.unwrap();
+    let ctx = SessionContext::new();
+    register_aggregate_simple_csv(&ctx).await.unwrap();
 
     let sql = "SELECT distinct c3 FROM aggregate_simple order by c3";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
 
     let expected = vec![
         "+-------+",
@@ -365,11 +365,11 @@ async fn select_distinct_simple_3() {
 
 #[tokio::test]
 async fn select_distinct_simple_4() {
-    let mut ctx = ExecutionContext::new();
-    register_aggregate_simple_csv(&mut ctx).await.unwrap();
+    let ctx = SessionContext::new();
+    register_aggregate_simple_csv(&ctx).await.unwrap();
 
     let sql = "SELECT distinct c1+c2 as a FROM aggregate_simple";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
 
     let expected = vec![
         "+-------------------------+",
@@ -387,7 +387,7 @@ async fn select_distinct_simple_4() {
 
 #[tokio::test]
 async fn select_distinct_from() {
-    let mut ctx = ExecutionContext::new();
+    let ctx = SessionContext::new();
 
     let sql = "select
         1 IS DISTINCT FROM CAST(NULL as INT) as a,
@@ -397,7 +397,7 @@ async fn select_distinct_from() {
         NULL IS DISTINCT FROM NULL as e,
         NULL IS NOT DISTINCT FROM NULL as f
     ";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec![
         "+------+-------+-------+------+-------+------+",
         "| a    | b     | c     | d    | e     | f    |",
@@ -410,7 +410,7 @@ async fn select_distinct_from() {
 
 #[tokio::test]
 async fn select_distinct_from_utf8() {
-    let mut ctx = ExecutionContext::new();
+    let ctx = SessionContext::new();
 
     let sql = "select
         'x' IS DISTINCT FROM NULL as a,
@@ -418,7 +418,7 @@ async fn select_distinct_from_utf8() {
         'x' IS NOT DISTINCT FROM NULL as c,
         'x' IS NOT DISTINCT FROM 'x' as d
     ";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec![
         "+------+-------+-------+------+",
         "| a    | b     | c     | d    |",
@@ -431,10 +431,10 @@ async fn select_distinct_from_utf8() {
 
 #[tokio::test]
 async fn csv_query_with_decimal_by_sql() -> Result<()> {
-    let mut ctx = ExecutionContext::new();
-    register_simple_aggregate_csv_with_decimal_by_sql(&mut ctx).await;
+    let ctx = SessionContext::new();
+    register_simple_aggregate_csv_with_decimal_by_sql(&ctx).await;
     let sql = "SELECT c1 from aggregate_simple";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec![
         "+----------+",
         "| c1       |",
@@ -462,10 +462,10 @@ async fn csv_query_with_decimal_by_sql() -> Result<()> {
 
 #[tokio::test]
 async fn use_between_expression_in_select_query() -> Result<()> {
-    let mut ctx = ExecutionContext::new();
+    let ctx = SessionContext::new();
 
     let sql = "SELECT 1 NOT BETWEEN 3 AND 5";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec![
         "+--------------------------------------------+",
         "| Int64(1) NOT BETWEEN Int64(3) AND Int64(5) |",
@@ -481,7 +481,7 @@ async fn use_between_expression_in_select_query() -> Result<()> {
     ctx.register_table("test", Arc::new(table))?;
 
     let sql = "SELECT abs(c1) BETWEEN 0 AND LoG(c1 * 100 ) FROM test";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     // Expect field name to be correctly converted for expr, low and high.
     let expected = vec![
         "+--------------------------------------------------------------------+",
@@ -496,7 +496,7 @@ async fn use_between_expression_in_select_query() -> Result<()> {
     assert_batches_eq!(expected, &actual);
 
     let sql = "EXPLAIN SELECT c1 BETWEEN 2 AND 3 FROM test";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let formatted = arrow::util::pretty::pretty_format_batches(&actual)
         .unwrap()
         .to_string();
@@ -512,7 +512,7 @@ async fn use_between_expression_in_select_query() -> Result<()> {
 
 #[tokio::test]
 async fn query_get_indexed_field() -> Result<()> {
-    let mut ctx = ExecutionContext::new();
+    let ctx = SessionContext::new();
     let schema = Arc::new(Schema::new(vec![Field::new(
         "some_list",
         DataType::List(Box::new(Field::new("item", DataType::Int64, true))),
@@ -536,7 +536,7 @@ async fn query_get_indexed_field() -> Result<()> {
 
     // Original column is micros, convert to millis and check timestamp
     let sql = "SELECT some_list[0] as i0 FROM ints LIMIT 3";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec![
         "+----+", "| i0 |", "+----+", "| 0  |", "| 4  |", "| 7  |", "+----+",
     ];
@@ -546,7 +546,7 @@ async fn query_get_indexed_field() -> Result<()> {
 
 #[tokio::test]
 async fn query_nested_get_indexed_field() -> Result<()> {
-    let mut ctx = ExecutionContext::new();
+    let ctx = SessionContext::new();
     let nested_dt = DataType::List(Box::new(Field::new("item", DataType::Int64, true)));
     // Nested schema of { "some_list": [[i64]] }
     let schema = Arc::new(Schema::new(vec![Field::new(
@@ -582,7 +582,7 @@ async fn query_nested_get_indexed_field() -> Result<()> {
 
     // Original column is micros, convert to millis and check timestamp
     let sql = "SELECT some_list[0] as i0 FROM ints LIMIT 3";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec![
         "+----------+",
         "| i0       |",
@@ -594,7 +594,7 @@ async fn query_nested_get_indexed_field() -> Result<()> {
     ];
     assert_batches_eq!(expected, &actual);
     let sql = "SELECT some_list[0][0] as i0 FROM ints LIMIT 3";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec![
         "+----+", "| i0 |", "+----+", "| 0  |", "| 5  |", "| 11 |", "+----+",
     ];
@@ -604,7 +604,7 @@ async fn query_nested_get_indexed_field() -> Result<()> {
 
 #[tokio::test]
 async fn query_nested_get_indexed_field_on_struct() -> Result<()> {
-    let mut ctx = ExecutionContext::new();
+    let ctx = SessionContext::new();
     let nested_dt = DataType::List(Box::new(Field::new("item", DataType::Int64, true)));
     // Nested schema of { "some_struct": { "bar": [i64] } }
     let struct_fields = vec![Field::new("bar", nested_dt.clone(), true)];
@@ -632,7 +632,7 @@ async fn query_nested_get_indexed_field_on_struct() -> Result<()> {
 
     // Original column is micros, convert to millis and check timestamp
     let sql = "SELECT some_struct[\"bar\"] as l0 FROM structs LIMIT 3";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec![
         "+----------------+",
         "| l0             |",
@@ -644,7 +644,7 @@ async fn query_nested_get_indexed_field_on_struct() -> Result<()> {
     ];
     assert_batches_eq!(expected, &actual);
     let sql = "SELECT some_struct[\"bar\"][0] as i0 FROM structs LIMIT 3";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec![
         "+----+", "| i0 |", "+----+", "| 0  |", "| 4  |", "| 8  |", "+----+",
     ];
@@ -673,12 +673,12 @@ async fn query_on_string_dictionary() -> Result<()> {
     .unwrap();
 
     let table = MemTable::try_new(batch.schema(), vec![vec![batch]])?;
-    let mut ctx = ExecutionContext::new();
+    let ctx = SessionContext::new();
     ctx.register_table("test", Arc::new(table))?;
 
     // Basic SELECT
     let sql = "SELECT d1 FROM test";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec![
         "+-------+",
         "| d1    |",
@@ -692,7 +692,7 @@ async fn query_on_string_dictionary() -> Result<()> {
 
     // basic filtering
     let sql = "SELECT d1 FROM test WHERE d1 IS NOT NULL";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec![
         "+-------+",
         "| d1    |",
@@ -705,7 +705,7 @@ async fn query_on_string_dictionary() -> Result<()> {
 
     // comparison with constant
     let sql = "SELECT d1 FROM test WHERE d1 = 'three'";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec![
         "+-------+",
         "| d1    |",
@@ -717,7 +717,7 @@ async fn query_on_string_dictionary() -> Result<()> {
 
     // comparison with another dictionary column
     let sql = "SELECT d1 FROM test WHERE d1 = d2";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec![
         "+-------+",
         "| d1    |",
@@ -729,7 +729,7 @@ async fn query_on_string_dictionary() -> Result<()> {
 
     // order comparison with another dictionary column
     let sql = "SELECT d1 FROM test WHERE d1 <= d2";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec![
         "+-------+",
         "| d1    |",
@@ -741,7 +741,7 @@ async fn query_on_string_dictionary() -> Result<()> {
 
     // comparison with a non dictionary column
     let sql = "SELECT d1 FROM test WHERE d1 = d3";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec![
         "+-------+",
         "| d1    |",
@@ -753,7 +753,7 @@ async fn query_on_string_dictionary() -> Result<()> {
 
     // filtering with constant
     let sql = "SELECT d1 FROM test WHERE d1 = 'three'";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec![
         "+-------+",
         "| d1    |",
@@ -765,7 +765,7 @@ async fn query_on_string_dictionary() -> Result<()> {
 
     // Expression evaluation
     let sql = "SELECT concat(d1, '-foo') FROM test";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec![
         "+------------------------------+",
         "| concat(test.d1,Utf8(\"-foo\")) |",
@@ -779,7 +779,7 @@ async fn query_on_string_dictionary() -> Result<()> {
 
     // Expression evaluation with two dictionaries
     let sql = "SELECT concat(d1, d2) FROM test";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec![
         "+-------------------------+",
         "| concat(test.d1,test.d2) |",
@@ -793,7 +793,7 @@ async fn query_on_string_dictionary() -> Result<()> {
 
     // aggregation
     let sql = "SELECT COUNT(d1) FROM test";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec![
         "+----------------+",
         "| COUNT(test.d1) |",
@@ -805,7 +805,7 @@ async fn query_on_string_dictionary() -> Result<()> {
 
     // aggregation min
     let sql = "SELECT MIN(d1) FROM test";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec![
         "+--------------+",
         "| MIN(test.d1) |",
@@ -817,7 +817,7 @@ async fn query_on_string_dictionary() -> Result<()> {
 
     // aggregation max
     let sql = "SELECT MAX(d1) FROM test";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec![
         "+--------------+",
         "| MAX(test.d1) |",
@@ -829,7 +829,7 @@ async fn query_on_string_dictionary() -> Result<()> {
 
     // grouping
     let sql = "SELECT d1, COUNT(*) FROM test group by d1";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec![
         "+-------+-----------------+",
         "| d1    | COUNT(UInt8(1)) |",
@@ -843,7 +843,7 @@ async fn query_on_string_dictionary() -> Result<()> {
 
     // window functions
     let sql = "SELECT d1, row_number() OVER (partition by d1) FROM test";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec![
         "+-------+--------------+",
         "| d1    | ROW_NUMBER() |",
@@ -862,11 +862,11 @@ async fn query_on_string_dictionary() -> Result<()> {
 async fn query_cte() -> Result<()> {
     // Test for SELECT <expression> without FROM.
     // Should evaluate expressions in project position.
-    let mut ctx = ExecutionContext::new();
+    let ctx = SessionContext::new();
 
     // simple with
     let sql = "WITH t AS (SELECT 1) SELECT * FROM t";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec![
         "+----------+",
         "| Int64(1) |",
@@ -879,19 +879,19 @@ async fn query_cte() -> Result<()> {
     // with + union
     let sql =
         "WITH t AS (SELECT 1 AS a), u AS (SELECT 2 AS a) SELECT * FROM t UNION ALL SELECT * FROM u";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec!["+---+", "| a |", "+---+", "| 1 |", "| 2 |", "+---+"];
     assert_batches_eq!(expected, &actual);
 
     // with + join
     let sql = "WITH t AS (SELECT 1 AS id1), u AS (SELECT 1 AS id2, 5 as x) SELECT x FROM t JOIN u ON (id1 = id2)";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec!["+---+", "| x |", "+---+", "| 5 |", "+---+"];
     assert_batches_eq!(expected, &actual);
 
     // backward reference
     let sql = "WITH t AS (SELECT 1 AS id1), u AS (SELECT * FROM t) SELECT * from u";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec!["+-----+", "| id1 |", "+-----+", "| 1   |", "+-----+"];
     assert_batches_eq!(expected, &actual);
 
@@ -900,8 +900,8 @@ async fn query_cte() -> Result<()> {
 
 #[tokio::test]
 async fn csv_select_nested() -> Result<()> {
-    let mut ctx = ExecutionContext::new();
-    register_aggregate_csv(&mut ctx).await?;
+    let ctx = SessionContext::new();
+    register_aggregate_csv(&ctx).await?;
     let sql = "SELECT o1, o2, c3
                FROM (
                  SELECT c1 AS o1, c2 + 1 AS o2, c3
@@ -912,7 +912,7 @@ async fn csv_select_nested() -> Result<()> {
                    ORDER BY c2 ASC, c3 ASC
                  ) AS a
                ) AS b";
-    let actual = execute_to_batches(&mut ctx, sql).await;
+    let actual = execute_to_batches(&ctx, sql).await;
     let expected = vec![
         "+----+----+------+",
         "| o1 | o2 | c3   |",
@@ -942,8 +942,7 @@ async fn parallel_query_with_filter() -> Result<()> {
 
     let physical_plan = ctx.create_physical_plan(&logical_plan).await?;
 
-    let runtime = ctx.state.lock().runtime_env.clone();
-    let results = collect_partitioned(physical_plan, runtime).await?;
+    let results = collect_partitioned(physical_plan).await?;
 
     // note that the order of partitions is not deterministic
     let mut num_rows = 0;

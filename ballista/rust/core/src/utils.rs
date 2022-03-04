@@ -44,9 +44,10 @@ use datafusion::arrow::{
     record_batch::RecordBatch,
 };
 use datafusion::error::DataFusionError;
-use datafusion::execution::context::{
-    ExecutionConfig, ExecutionContext, ExecutionContextState, QueryPlanner,
-};
+use datafusion::execution::context::{SessionConfig as ExecutionConfig, SessionState};
+use datafusion::execution::context::SessionContext as ExecutionContext;
+use datafusion::execution::context::SessionState as ExecutionState;
+use datafusion::execution::context::QueryPlanner;
 use datafusion::logical_plan::{LogicalPlan, Operator, TableScan};
 use datafusion::physical_optimizer::coalesce_batches::CoalesceBatches;
 use datafusion::physical_optimizer::merge_exec::AddCoalescePartitionsExec;
@@ -67,6 +68,8 @@ use datafusion::physical_plan::{
 };
 use futures::{future, Stream, StreamExt};
 use std::time::Instant;
+use datafusion::execution::runtime_env::{RuntimeConfig, RuntimeEnv};
+use datafusion::prelude::SessionContext;
 
 /// Stream data to disk in Arrow IPC format
 
@@ -236,21 +239,23 @@ fn build_exec_plan_diagram(
     Ok(node_id)
 }
 
-/// Create a DataFusion context that uses the BallistaQueryPlanner to send logical plans
+/// Create a client DataFusion Context that uses the BallistaQueryPlanner to send logical plans
 /// to a Ballista scheduler
 pub fn create_df_ctx_with_ballista_query_planner<T: 'static + AsLogicalPlan>(
-    scheduler_host: &str,
-    scheduler_port: u16,
+    scheduler_url: String,
+    session_id: String,
     config: &BallistaConfig,
 ) -> ExecutionContext {
-    let scheduler_url = format!("http://{}:{}", scheduler_host, scheduler_port);
     let planner: Arc<BallistaQueryPlanner<T>> =
         Arc::new(BallistaQueryPlanner::new(scheduler_url, config.clone()));
-    let config = ExecutionConfig::new()
-        .with_query_planner(planner)
+    let session_config = ExecutionConfig::new()
         .with_target_partitions(config.default_shuffle_partitions())
         .with_information_schema(true);
-    ExecutionContext::with_config(config)
+    let mut session_state = ExecutionState::with_config(session_config).with_query_planner(planner);
+    session_state.session_id = session_id;
+    // the ExecutionContext created here is the client side context, but the session_id is from server side.
+    let df_ctx = ExecutionContext::with_state(session_state, RuntimeEnv::global());
+    df_ctx
 }
 
 pub struct BallistaQueryPlanner<T: AsLogicalPlan> {
@@ -303,12 +308,12 @@ impl<T: 'static + AsLogicalPlan> QueryPlanner for BallistaQueryPlanner<T> {
     async fn create_physical_plan(
         &self,
         logical_plan: &LogicalPlan,
-        _ctx_state: &ExecutionContextState,
+        session_state: &SessionState,
     ) -> std::result::Result<Arc<dyn ExecutionPlan>, DataFusionError> {
         match logical_plan {
             LogicalPlan::CreateExternalTable(_) => {
                 // table state is managed locally in the BallistaContext, not in the scheduler
-                Ok(Arc::new(EmptyExec::new(false, Arc::new(Schema::empty()))))
+                Ok(Arc::new(EmptyExec::new(false, Arc::new(Schema::empty()), session_state.session_id.clone())))
             }
             _ => Ok(Arc::new(DistributedQueryExec::with_repr(
                 self.scheduler_url.clone(),
@@ -316,6 +321,7 @@ impl<T: 'static + AsLogicalPlan> QueryPlanner for BallistaQueryPlanner<T> {
                 logical_plan.clone(),
                 self.extension_codec.clone(),
                 self.plan_repr,
+                session_state.session_id.clone(),
             ))),
         }
     }

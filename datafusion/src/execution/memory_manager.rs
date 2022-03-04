@@ -528,7 +528,7 @@ mod tests {
     async fn basic_functionalities() {
         let config = RuntimeConfig::new()
             .with_memory_manager(MemoryManagerConfig::try_new_limit(100, 1.0).unwrap());
-        let runtime = Arc::new(RuntimeEnv::new(config).unwrap());
+        let runtime = Arc::new(RuntimeEnv::new_local_env(config).unwrap());
 
         DummyTracker::new(0, runtime.clone(), 5);
         assert_eq!(runtime.memory_manager.get_tracker_total(), 5);

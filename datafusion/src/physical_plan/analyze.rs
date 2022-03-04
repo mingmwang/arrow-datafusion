@@ -32,7 +32,6 @@ use futures::StreamExt;
 
 use super::expressions::PhysicalSortExpr;
 use super::{stream::RecordBatchReceiverStream, Distribution, SendableRecordBatchStream};
-use crate::execution::runtime_env::RuntimeEnv;
 use async_trait::async_trait;
 
 /// `EXPLAIN ANALYZE` execution plan operator. This operator runs its input,
@@ -112,7 +111,6 @@ impl ExecutionPlan for AnalyzeExec {
     async fn execute(
         &self,
         partition: usize,
-        runtime: Arc<RuntimeEnv>,
     ) -> Result<SendableRecordBatchStream> {
         if 0 != partition {
             return Err(DataFusionError::Internal(format!(
@@ -133,7 +131,7 @@ impl ExecutionPlan for AnalyzeExec {
         let (tx, rx) = tokio::sync::mpsc::channel(input_partitions);
 
         let captured_input = self.input.clone();
-        let mut input_stream = captured_input.execute(0, runtime).await?;
+        let mut input_stream = captured_input.execute(0).await?;
         let captured_schema = self.schema.clone();
         let verbose = self.verbose;
 
@@ -231,6 +229,10 @@ impl ExecutionPlan for AnalyzeExec {
         // Statistics an an ANALYZE plan are not relevant
         Statistics::default()
     }
+
+    fn session_id(&self) -> String {
+        self.input.session_id()
+    }
 }
 
 #[cfg(test)]
@@ -250,15 +252,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_drop_cancel() -> Result<()> {
-        let runtime = Arc::new(RuntimeEnv::default());
         let schema =
             Arc::new(Schema::new(vec![Field::new("a", DataType::Float32, true)]));
 
-        let blocking_exec = Arc::new(BlockingExec::new(Arc::clone(&schema), 1));
+        let blocking_exec = Arc::new(BlockingExec::new(Arc::clone(&schema), 1, "sess_123".to_owned()));
         let refs = blocking_exec.refs();
         let analyze_exec = Arc::new(AnalyzeExec::new(true, blocking_exec, schema));
 
-        let fut = collect(analyze_exec, runtime);
+        let fut = collect(analyze_exec);
         let mut fut = fut.boxed();
 
         assert_is_pending(&mut fut);

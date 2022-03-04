@@ -174,7 +174,6 @@ pub(crate) fn find_ranges_in_range<'a>(
 mod tests {
     use super::*;
     use crate::datasource::object_store::local::LocalFileSystem;
-    use crate::execution::runtime_env::RuntimeEnv;
     use crate::physical_plan::aggregates::AggregateFunction;
     use crate::physical_plan::expressions::col;
     use crate::physical_plan::file_format::{CsvExec, FileScanConfig};
@@ -203,6 +202,7 @@ mod tests {
             },
             true,
             b',',
+            "sess_123".to_owned()
         );
 
         let input = Arc::new(csv);
@@ -211,7 +211,6 @@ mod tests {
 
     #[tokio::test]
     async fn window_function() -> Result<()> {
-        let runtime = Arc::new(RuntimeEnv::default());
         let (input, schema) = create_test_schema(1)?;
 
         let window_exec = Arc::new(WindowAggExec::try_new(
@@ -248,7 +247,7 @@ mod tests {
             schema.clone(),
         )?);
 
-        let result: Vec<RecordBatch> = collect(window_exec, runtime).await?;
+        let result: Vec<RecordBatch> = collect(window_exec).await?;
         assert_eq!(result.len(), 1);
 
         let columns = result[0].columns();
@@ -272,11 +271,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_drop_cancel() -> Result<()> {
-        let runtime = Arc::new(RuntimeEnv::default());
         let schema =
             Arc::new(Schema::new(vec![Field::new("a", DataType::Float32, true)]));
 
-        let blocking_exec = Arc::new(BlockingExec::new(Arc::clone(&schema), 1));
+        let blocking_exec = Arc::new(BlockingExec::new(Arc::clone(&schema), 1, "sess_123".to_owned()));
         let refs = blocking_exec.refs();
         let window_agg_exec = Arc::new(WindowAggExec::try_new(
             vec![create_window_expr(
@@ -292,7 +290,7 @@ mod tests {
             schema,
         )?);
 
-        let fut = collect(window_agg_exec, runtime);
+        let fut = collect(window_agg_exec);
         let mut fut = fut.boxed();
 
         assert_is_pending(&mut fut);
