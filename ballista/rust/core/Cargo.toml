@@ -54,4 +54,4 @@ parking_lot = "0.12"
 tempfile = "3"
 
 [build-dependencies]
-tonic-build = { version = "0.6" }
+tonic-build = { version = "0.8" }
